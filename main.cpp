@@ -34,6 +34,7 @@ extern "C"
 #include "pce-go.h"
 #include "pce.h"
 #include "psg.h"
+#include "cd.h"
 }
 
 bool isFatalError = false;
@@ -651,6 +652,58 @@ int main()
     isFatalError = !Frens::initAll(selectedRom, CPUFreqKHz, 0, 0, AUDIOBUFFERSIZE, false, true);
     scaleMode8_7_ = Frens::applyScreenMode(settings.screenMode);
 
+    // CD BIOS self-test: scan /bios/ once at boot and log what we find.
+    // This is purely diagnostic — actual BIOS loading happens in LoadDisc()
+    // when the user selects a .cue file. Requires PSRAM and a mounted SD.
+    //
+    // All FatFS-heavy locals are static. The 3 KB main stack would overflow
+    // into core1's SCRATCH region with deep call chains here (DIR + FILINFO
+    // + multiple FF_MAX_LFN buffers + cd_find_bios's own static-now buffers
+    // is fine, but stack-allocating here on top is not).
+    if (!isFatalError && Frens::isPsramEnabled())
+    {
+        printf("--- CD BIOS self-test ---\n");
+        static char     biosPath[FF_MAX_LFN + 8];
+        bios_variant_t  variant = BIOS_UNKNOWN;
+        if (cd_find_bios(biosPath, sizeof(biosPath), &variant) == 0) {
+            printf("Found CD BIOS: %s (region=%s)\n",
+                   biosPath, cd_bios_is_us() ? "US" : "JP");
+        } else {
+            printf("No CD BIOS in /bios/ — CD games will fail to load until one is added.\n");
+        }
+        printf("-------------------------\n");
+
+        // CUE parser diagnostic: parse every .cue file in /diag/ (if any).
+        // Drop CUE+BIN pairs into /diag/ to validate parsing without booting.
+        static DIR     diagDir;
+        static FILINFO diagFno;
+        static char    diagCuePath[FF_MAX_LFN + 8];
+        if (f_opendir(&diagDir, "/diag") == FR_OK) {
+            printf("--- CUE parser diagnostic (/diag/) ---\n");
+            int count = 0;
+            while (f_readdir(&diagDir, &diagFno) == FR_OK && diagFno.fname[0]) {
+                if (diagFno.fattrib & (AM_DIR | AM_HID)) continue;
+                size_t n = strlen(diagFno.fname);
+                if (n < 4 || strcasecmp(diagFno.fname + n - 4, ".cue") != 0) continue;
+
+                snprintf(diagCuePath, sizeof(diagCuePath), "/diag/%s", diagFno.fname);
+                printf("[diag] parsing %s\n", diagCuePath);
+                if (cd_load_cue(diagCuePath) == 0) {
+                    printf("[diag] OK\n");
+                } else {
+                    printf("[diag] FAILED\n");
+                }
+                cd_close();
+                count++;
+            }
+            f_closedir(&diagDir);
+            if (count == 0) {
+                printf("[diag] /diag/ is empty (no .cue files)\n");
+            }
+            printf("--------------------------------------\n");
+        }
+    }
+
     buildPaletteLUT();
 
     bool showSplash = true;
@@ -661,13 +714,37 @@ int main()
     {
         if (strlen(selectedRom) == 0 || reset == true)
         {
-            menu("Pico-PCE+", ErrorMessage, isFatalError, showSplash, ".pce", selectedRom);
+            // CD-ROM games (.cue) require PSRAM for the additional ~2.6MB of
+            // CD/SCD/ADPCM/Arcade Card buffers, so hide them on non-PSRAM boards.
+            const char *menuExts = Frens::isPsramEnabled() ? ".pce .cue" : ".pce";
+            menu("Pico-PCE+", ErrorMessage, isFatalError, showSplash, menuExts, selectedRom);
             printf("Selected rom from menu: %s\n", selectedRom);
         }
         reset = false;
         fileSize = 0;
 
-        if (Frens::isPsramEnabled())
+        // Detect CD-ROM vs HuCard by file extension.
+        bool isCDGame = false;
+        if (strlen(selectedRom) > 0) {
+            char ext[8];
+            Frens::getextensionfromfilename(selectedRom, ext, sizeof(ext));
+            isCDGame = (strcasecmp(ext, ".cue") == 0);
+        }
+
+        if (isCDGame)
+        {
+            // The menu's PSRAM loader copied the (small) .cue text into PSRAM
+            // at ROM_FILE_ADDR. We don't need it — LoadDisc() re-parses the
+            // CUE directly from SD and loads the BIOS into PSRAM instead.
+#if PICO_RP2350 && PSRAM_CS_PIN
+            if (Frens::isPsramEnabled() && ROM_FILE_ADDR) {
+                Frens::f_free((void *)ROM_FILE_ADDR);
+                ROM_FILE_ADDR = 0;
+            }
+#endif
+            printf("Now playing (CD): %s\n", selectedRom);
+        }
+        else if (Frens::isPsramEnabled())
         {
 #if PICO_RP2350 && PSRAM_CS_PIN
             PicoPlusPsram &psram_ = PicoPlusPsram::getInstance();
@@ -696,7 +773,8 @@ int main()
             f_close(&file);
         }
 
-        printf("Now playing: %s (%d bytes)\n", selectedRom, fileSize);
+        if (!isCDGame)
+            printf("Now playing: %s (%d bytes)\n", selectedRom, fileSize);
 
         if (isAutoSaveStateConfigured())
         {
@@ -715,16 +793,33 @@ int main()
         {
             reset = resetGame = false;
             InitPCE(PCE_AUDIO_RATE, true);
-            if (LoadCard((uint8_t *)ROM_FILE_ADDR, fileSize) != 0)
+            int loadResult;
+            if (isCDGame) {
+                loadResult = LoadDisc(selectedRom);
+                if (loadResult != 0) {
+                    snprintf(ErrorMessage, ERRORMESSAGESIZE, "CD load failed");
+                }
+            } else {
+                loadResult = LoadCard((uint8_t *)ROM_FILE_ADDR, fileSize);
+                if (loadResult != 0) {
+                    snprintf(ErrorMessage, ERRORMESSAGESIZE, "ROM load failed");
+                }
+            }
+            if (loadResult != 0)
             {
-                snprintf(ErrorMessage, ERRORMESSAGESIZE, "ROM load failed");
                 printf("%s\n", ErrorMessage);
                 break;
             }
             printf("Starting game\n");
             Frens::PaceFrames60fps(true);
             process();
-            PCE.ROM = NULL; // prevent ShutdownPCE from freeing flash/PSRAM
+            if (isCDGame) {
+                // Close BIN handle (still-open until cd_term runs). The BIOS
+                // PSRAM allocation is owned by cd_term() and released there.
+                cd_close();
+            } else {
+                PCE.ROM = NULL; // prevent ShutdownPCE from freeing flash/PSRAM
+            }
             ShutdownPCE();
         } while (resetGame);
 

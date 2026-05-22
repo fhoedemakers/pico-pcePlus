@@ -6,6 +6,7 @@
 #include "pce-go.h"
 #include "pce.h"
 #include "gfx.h"
+#include "cd.h"
 
 // Global struct containing our emulated hardware status
 PCE_t PCE;
@@ -57,6 +58,9 @@ pce_reset(bool hard)
 	pce_bank_set(1, 0xF8);
 	pce_bank_set(0, 0xFF);
 
+	// Reset CD subsystem (no-op when no disc is attached)
+	cd_reset();
+
 	// Reset CPU
 	h6280_reset();
 }
@@ -90,6 +94,11 @@ pce_init(void)
 	PCE.MemoryMapR[0xFF] = PCE.IOAREA;
 	PCE.MemoryMapW[0xFF] = PCE.IOAREA;
 
+	if (cd_init() != 0) {
+		pce_term();
+		return -1;
+	}
+
 	// pce_reset();
 
 	return 0;
@@ -102,6 +111,8 @@ pce_init(void)
 void
 pce_term(void)
 {
+	cd_term();
+
 	free(PCE.RAM);
 	PCE.RAM = NULL;
 	free(PCE.VRAM);
@@ -276,7 +287,12 @@ uint8_t __not_in_flash_func(pce_readIO)(uint16_t A)
 			ret &= 15;
 			PCE.Joypad.counter = ((PCE.Joypad.counter + 1) % 5);
 		}
-		ret |= 0x30; // those 2 bits are always on, bit 6 = 0 (Jap), bit 7 = 0 (Attached cd)
+		// Bits 4-5 always set. Bit 6 = 0 (Japan) / 1 (US). Bit 7 = 0 (CD
+		// attached) / 1 (no CD). The BIOS reads this to decide whether to
+		// boot in CD mode and whether to apply region-specific logic.
+		ret |= 0x30;
+		if (cd_bios_is_us())  ret |= 0x40;
+		if (!CD.cd_attached)  ret |= 0x80;
 		break;
 
 	case 0x1400:                /* IRQ */
@@ -292,12 +308,13 @@ uint8_t __not_in_flash_func(pce_readIO)(uint16_t A)
 		break;
 
 	case 0x1A00:                // Arcade Card
-		MESSAGE_INFO("Arcade Card not supported : 0x%04X\n", A);
+		if (CD.cd_attached)
+			ret = cd_read(A);
 		break;
 
-	case 0x1800:                // CD-ROM extention
-	case 0x18C0:                // Super System Card
-		MESSAGE_INFO("CD Emulation not implemented : 0x%04X\n", A);
+	case 0x1800:                // CD-ROM extension + Super System Card ID
+		if (CD.cd_attached)
+			ret = cd_read(A);
 		break;
 	}
 
@@ -666,11 +683,13 @@ void __not_in_flash_func(pce_writeIO)(uint16_t A, uint8_t V)
 		break;
 
 	case 0x1A00:                /* Arcade Card */
-		MESSAGE_INFO("Arcade Card not supported : %d into 0x%04X\n", V, A);
+		if (CD.cd_attached)
+			cd_write(A, V);
 		return;
 
-	case 0x1800:                /* CD-ROM extention */
-		MESSAGE_INFO("CD Emulation not implemented : %d 0x%04X\n", V, A);
+	case 0x1800:                /* CD-ROM extension + Super System Card ID */
+		if (CD.cd_attached)
+			cd_write(A, V);
 		return;
 
 	case 0x1F00:                /* Street Fighter 2 Mapper */

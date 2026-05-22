@@ -78,6 +78,10 @@ void ShutdownPCE();
 int InitPCE(int samplerate, bool stereo);
 int LoadCard(uint8_t *data, size_t size);
 int LoadFile(const char *name);
+// Load a PC Engine CD-ROM game. Scans /bios/ for a System Card / Arcade Card
+// BIOS, loads it into PSRAM, sets up CD/SCD/ADPCM/Arcade Card RAM, parses the
+// CUE sheet and opens the BIN file. Requires PSRAM. Returns 0 on success.
+int LoadDisc(const char *cue_path);
 void *PalettePCE(int bitdepth);
 
 typedef struct __attribute__((packed))

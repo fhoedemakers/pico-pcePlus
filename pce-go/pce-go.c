@@ -8,6 +8,12 @@
 #include "gfx.h"
 #include "psg.h"
 #include "pce.h"
+#include "cd.h"
+
+#include "ff.h"
+
+extern void *frens_f_malloc(size_t size);
+extern void  frens_f_free(void *ptr);
 
 /**
  * Save state file description.
@@ -228,6 +234,137 @@ LoadFile(const char *name)
 	fclose(fp);
 
 	return LoadCard(data, fsize);
+}
+
+
+// CD RAM sizes (bytes)
+#define CD_RAM_SIZE      0x10000   // 64KB
+#define SCD_RAM_SIZE     0x30000   // 192KB
+#define ADPCM_RAM_SIZE   0x10000   // 64KB
+#define ACD_RAM_SIZE     0x200000  // 2MB
+#define BRAM_PAGE_SIZE   0x2000    // 8KB page, lower 2KB is real BRAM
+
+// Internal helper: free anything cd_term() would free, plus any partially-
+// installed BIOS in PCE.ROM. Used to undo allocations when LoadDisc fails.
+static void unload_disc_state(void)
+{
+	cd_term();
+	if (PCE.ROM) {
+		frens_f_free(PCE.ROM);
+		PCE.ROM = NULL;
+		PCE.ROM_DATA = NULL;
+		PCE.ROM_SIZE = 0;
+	}
+}
+
+/**
+ * Load a CD-ROM game.
+ *
+ * Steps:
+ *   1. Locate a BIOS in /bios/ via cd_find_bios() (CRC-matched, picks the
+ *      most capable variant).
+ *   2. Load the BIOS into PSRAM and map it to hardware pages 0x00-0x1F.
+ *   3. Allocate CD-ROM RAM, Super System Card RAM, ADPCM RAM, Arcade Card
+ *      RAM and the BRAM page in PSRAM.
+ *   4. Parse the CUE sheet and open the BIN file with a persistent handle.
+ *   5. Install the CD memory map and reset the emulator.
+ */
+int
+LoadDisc(const char *cue_path)
+{
+	if (!cue_path) return -1;
+
+	// Start from a clean slate — if the previous game was also a CD this
+	// frees the prior BIOS/CD allocations.
+	unload_disc_state();
+	if (cd_init() != 0) {
+		MESSAGE_ERROR("cd_init failed\n");
+		return -1;
+	}
+
+	// --- 1. Find BIOS ---
+	// Static for stack safety (FF_MAX_LFN+8 buffer + ~600 B FIL would push
+	// into core1's SCRATCH region under the 3 KB stack).
+	static char bios_path[FF_MAX_LFN + 8];
+	static FIL  fil;
+	bios_variant_t variant = BIOS_UNKNOWN;
+	if (cd_find_bios(bios_path, sizeof(bios_path), &variant) != 0) {
+		MESSAGE_ERROR("No CD BIOS found in /bios/\n");
+		return -1;
+	}
+
+	// --- 2. Load BIOS into PSRAM ---
+	if (f_open(&fil, bios_path, FA_READ) != FR_OK) {
+		MESSAGE_ERROR("Cannot open BIOS %s\n", bios_path);
+		return -1;
+	}
+	FSIZE_t bios_size = f_size(&fil);
+	if (bios_size < 0x2000 || bios_size > 0x100000) {
+		MESSAGE_ERROR("BIOS size unreasonable: %lu\n", (unsigned long)bios_size);
+		f_close(&fil);
+		return -1;
+	}
+	PCE.ROM = (uint8_t *)frens_f_malloc(bios_size);
+	if (!PCE.ROM) {
+		MESSAGE_ERROR("Cannot allocate %lu bytes for BIOS\n", (unsigned long)bios_size);
+		f_close(&fil);
+		return -1;
+	}
+	UINT br = 0;
+	if (f_read(&fil, PCE.ROM, bios_size, &br) != FR_OK || br != bios_size) {
+		MESSAGE_ERROR("BIOS read failed (got %u of %lu)\n", br, (unsigned long)bios_size);
+		f_close(&fil);
+		unload_disc_state();
+		return -1;
+	}
+	f_close(&fil);
+
+	PCE.ROM_DATA = PCE.ROM;
+	PCE.ROM_SIZE = bios_size / 0x2000;     // size in 8KB blocks
+	PCE.ROM_CRC = 0;                       // BIOS CRC tracked in CD.bios_variant
+
+	// Map BIOS at hardware pages 0x00 .. (rom_pages-1). 32 pages = 256KB.
+	int rom_pages = (int)(bios_size / 0x2000);
+	if (rom_pages > 0x80) rom_pages = 0x80;
+	for (int i = 0; i < rom_pages; i++) {
+		PCE.MemoryMapR[i] = PCE.ROM_DATA + i * 0x2000;
+		PCE.MemoryMapW[i] = PCE.NULLRAM;   // BIOS is read-only
+	}
+
+	// --- 3. Allocate CD/SCD/ADPCM/Arcade Card RAM + BRAM page ---
+	CD.cd_ram    = (uint8_t *)frens_f_malloc(CD_RAM_SIZE);
+	CD.scd_ram   = (uint8_t *)frens_f_malloc(SCD_RAM_SIZE);
+	CD.adpcm_ram = (uint8_t *)frens_f_malloc(ADPCM_RAM_SIZE);
+	CD.acd_ram   = (uint8_t *)frens_f_malloc(ACD_RAM_SIZE);
+	CD.bram      = (uint8_t *)frens_f_malloc(BRAM_PAGE_SIZE);
+	if (!CD.cd_ram || !CD.scd_ram || !CD.adpcm_ram || !CD.acd_ram || !CD.bram) {
+		MESSAGE_ERROR("CD/Arcade Card RAM allocation failed\n");
+		unload_disc_state();
+		return -1;
+	}
+	memset(CD.cd_ram,    0,    CD_RAM_SIZE);
+	memset(CD.scd_ram,   0,    SCD_RAM_SIZE);
+	memset(CD.adpcm_ram, 0,    ADPCM_RAM_SIZE);
+	memset(CD.acd_ram,   0,    ACD_RAM_SIZE);
+	memset(CD.bram,      0xFF, BRAM_PAGE_SIZE);   // "empty" pattern
+
+	// --- 4. Parse CUE + open BIN ---
+	if (cd_load_cue(cue_path) != 0) {
+		MESSAGE_ERROR("cd_load_cue failed for %s\n", cue_path);
+		unload_disc_state();
+		return -1;
+	}
+
+	// --- 5. Wire memory map and reset ---
+	cd_setup_memory_map();
+	CD.cd_attached = true;
+	CD.bram_locked = true;     // real hardware boots with BRAM locked
+
+	MESSAGE_INFO("LoadDisc: BIOS=%s (variant=%d, %s), CD attached\n",
+	             bios_path, (int)variant, CD.bios_is_us ? "US" : "JP");
+
+	ResetPCE(true);
+	return 0;
 }
 
 
