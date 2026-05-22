@@ -2,6 +2,7 @@
 //
 #include <stdlib.h>
 #include <string.h>
+#include "pico.h"
 #include "pce-go.h"
 #include "pce.h"
 #include "gfx.h"
@@ -121,8 +122,7 @@ pce_term(void)
 /**
   * Run emulation for one frame
   **/
-void
-pce_run(void)
+void __not_in_flash_func(pce_run)(void)
 {
 	// Handle pending video mode changes
 	if (PCE.VDC.mode_chg) {
@@ -193,8 +193,7 @@ cart_write(uint16_t A, uint8_t V)
 }
 
 
-inline uint8_t
-pce_readIO(uint16_t A)
+uint8_t __not_in_flash_func(pce_readIO)(uint16_t A)
 {
 	uint8_t ret = 0xFF; // Open Bus
 
@@ -312,8 +311,7 @@ pce_readIO(uint16_t A)
 }
 
 
-inline void
-pce_writeIO(uint16_t A, uint8_t V)
+void __not_in_flash_func(pce_writeIO)(uint16_t A, uint8_t V)
 {
 	TRACE_IO("IO Write %02x at %04x\n", V, A);
 

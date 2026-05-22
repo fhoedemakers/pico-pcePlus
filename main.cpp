@@ -1,10 +1,12 @@
 /**
- * Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+ * pico-pcePlus - PC Engine / TurboGrafx-16 emulator for Raspberry Pi Pico
  *
- * SPDX-License-Identifier: BSD-3-Clause
+ * Based on pce-go from retro-go (https://github.com/ducalex/retro-go)
+ * Using the video/audio framework from pico-infonesPlus
  */
 
 #include <stdio.h>
+#include <string.h>
 #include "pico/stdlib.h"
 #include "hardware/divider.h"
 #include "hardware/clocks.h"
@@ -21,12 +23,18 @@
 #include "settings.h"
 #include "FrensFonts.h"
 #include "vumeter.h"
-#include "shared.h"
 #include "mytypes.h"
 #include "PicoPlusPsram.h"
 #include "menu_settings.h"
 #include "state.h"
 #include "soundrecorder.h"
+
+extern "C"
+{
+#include "pce-go.h"
+#include "pce.h"
+#include "psg.h"
+}
 
 bool isFatalError = false;
 static FATFS fs;
@@ -34,34 +42,38 @@ char *romName;
 bool showSettings = false;
 bool loadSaveStateMenu = false;
 SaveStateTypes quickSaveAction = SaveStateTypes::NONE;
-static bool isGameGear = false;
 static uint32_t start_tick_us = 0;
 static uint32_t fps = 0;
 static uint8_t framesbeforeAutoStateIsLoaded = 0;
 static char fpsString[3] = "00";
-#if PICO_RP2350
-extern const unsigned char EmuOverlay_444[];
-extern const unsigned char EmuOverlay_555[];
-#endif
-// DVI Note: When using framebuffer or render audio per frame, AUDIOBUFFERSIZE must be increased to 1024
-// #if PICO_RP2350
-// #define AUDIOBUFFERSIZE 1024
-// #else
-// #define AUDIOBUFFERSIZE 512
-// #endif
-#define AUDIOBUFFERSIZE 1024
 
-#define EMULATOR_CLOCKFREQ_KHZ 252000 //  Overclock frequency in kHz when using Emulator
+#define AUDIOBUFFERSIZE 1024
+#define PCE_AUDIO_RATE 44100
+#define PCE_SAMPLES_PER_FRAME (PCE_AUDIO_RATE / 60)
+
+#define EMULATOR_CLOCKFREQ_KHZ 252000
 static uint32_t CPUFreqKHz = EMULATOR_CLOCKFREQ_KHZ;
-// Visibility configuration for options menu (NES specific)
-// 1 = show option line, 0 = hide.
-// Order must match enum in menu_options.h
-const int8_t g_settings_visibility_sms[MOPT_COUNT] = {
-    0,                               // Exit Game, or back to menu. Always visible when in-game.
-    0,                               // Reset Game. Always visible when in-game.
+
+// PCE indexed framebuffer: pce-go renders 8-bit palette indices here.
+// Renderer writes up to 16 bytes of scratch *before* and *after* the active
+// region (see render_lines() in pce-go/gfx.c: framebuffer_top = screen_buffer
+// - 16, plus sub-byte scroll_x shifts in draw_tiles). Pad with 16 bytes on
+// each side and expose the offset pointer to keep those scratch writes from
+// clobbering neighbouring BSS variables.
+static uint8_t pce_framebuffer_storage[XBUF_WIDTH * XBUF_HEIGHT + 32];
+static uint8_t *const pce_framebuffer = pce_framebuffer_storage + 16;
+
+// Lookup table: 8-bit palette index -> RGB555 (HSTX) or RGB444 (DVI)
+static uint16_t paletteLUT[256];
+
+// Settings visibility for PCE
+const int8_t g_settings_visibility_pce[MOPT_COUNT] = {
+    0,                               // Exit Game
+    0,                               // Reset Game
     0,                               // Save / Restore State
     !HSTX,                           // Screen Mode (only when not HSTX)
     HSTX,                            // Scanlines toggle (only when HSTX)
+    0,                               // Scanline type
     1,                               // FPS Overlay
     0,                               // Audio Enable
     0,                               // Frame Skip
@@ -70,667 +82,246 @@ const int8_t g_settings_visibility_sms[MOPT_COUNT] = {
     1,                               // Font Color
     1,                               // Font Back Color
     ENABLE_VU_METER,                 // VU Meter
-    //(HW_CONFIG == 8),              // Fruit Jam Internal Speaker
     (HW_CONFIG == 8),                // Fruit Jam Volume Control
-    0,                               // DMG Palette (SMS/Game Gear emulator does not use GameBoy palettes)
-    0,                               // Border Mode (Super Gameboy style borders not applicable for SMS/Game Gear)
+    0,                               // DMG Palette (not applicable)
+    0,                               // Border Mode (not applicable)
     0,                               // Rapid Fire on A
     0,                               // Rapid Fire on B
-    1                                // Enter bootsel mode
+    0,                               // Auto insert FDS disk (not applicable)
+    0,                               // Auto swap FDS disk (not applicable)
+    1,                               // Enter bootsel mode
+    0                                // FDS disk swap (not applicable)
 };
-const uint8_t g_available_screen_modes_sms[] = {
+
+const uint8_t g_available_screen_modes_pce[] = {
 #if PICO_RP2350
-    0, // SCANLINE_8_7, Does not work well with borders
+    0, // SCANLINE_8_7
 #else
-    1, // SCANLINE_8_7,
+    1, // SCANLINE_8_7
 #endif
 #if PICO_RP2350
-    0, // NOSCANLINE_8_7, Does not work well with borders
+    0, // NOSCANLINE_8_7
 #else
-    1, // NOSCANLINE_8_7,
+    1, // NOSCANLINE_8_7
 #endif
-    1, // SCANLINE_1_1,
+    1, // SCANLINE_1_1
     1  // NOSCANLINE_1_1
 };
 
-#define fpsfgcolor 0;     // black
-#define fpsbgcolor 0xFFF; // white
+#define fpsfgcolor 0
+#define fpsbgcolor 0xFFF
 
-#define MARGINTOP 24
-#define MARGINBOTTOM 4
-
-#define FPSSTART (((MARGINTOP + 7) / 8) * 8)
-#define FPSEND ((FPSSTART) + 8)
+#define FPSSTART 0
+#define FPSEND 8
 
 static bool reset = false;
 static bool resetGame = false;
 
 #if WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
-// Cached Wii pad state updated once per frame in ProcessAfterFrameIsRendered()
 static uint16_t wiipad_raw_cached = 0;
 #endif
 
-// The Sega Master system color palette converted to RGB444
-// so it can be used with the DVI library.
-// from https://segaretro.org/Palette
-#if 0
+// Build the palette lookup table mapping 8-bit PCE color indices to RGB
+// PCE palette index encoding: GGG_RRR_BB (3-bit green, 3-bit red, 2-bit blue)
+static void buildPaletteLUT()
+{
+    for (int i = 0; i < 256; i++)
+    {
+        int g3 = (i >> 5) & 7;
+        int r3 = (i >> 2) & 7;
+        int b2 = (i >> 0) & 3;
 #if !HSTX
-// RGB444 format
-WORD SMSPaletteRGB[64] = {
-    0x0, 0x500, 0xA00, 0xF00, 0x50, 0x550, 0xA50, 0xF50,
-    0xA0, 0x5A0, 0xAA0, 0xFA0, 0xF0, 0x5F0, 0xAF0, 0xFF0,
-    0x5, 0x505, 0xA05, 0xF05, 0x55, 0x555, 0xA55, 0xF55,
-    0xA5, 0x5A5, 0xAA5, 0xFA5, 0xF5, 0x5F5, 0xAF5, 0xFF5,
-    0xA, 0x50A, 0xA0A, 0xF0A, 0x5A, 0x55A, 0xA5A, 0xF5A,
-    0xAA, 0x5AA, 0xAAA, 0xFAA, 0xFA, 0x5FA, 0xAFA, 0xFFA,
-    0xF, 0x50F, 0xA0F, 0xF0F, 0x5F, 0x55F, 0xA5F, 0xF5F,
-    0xAF, 0x5AF, 0xAAF, 0xFAF, 0xFF, 0x5FF, 0xAFF, 0xFFF};
+        // RGB444
+        int r4 = (r3 << 1) | (r3 >> 2);
+        int g4 = (g3 << 1) | (g3 >> 2);
+        int b4 = (b2 << 2) | b2;
+        paletteLUT[i] = (r4 << 8) | (g4 << 4) | b4;
 #else
-// RGB555 format
-WORD SMSPaletteRGB[64] = {
-    0x0, 0x500, 0xA00, 0xF00, 0x50, 0x550, 0xA50, 0xF50,
-    0xA0, 0x5A0, 0xAA0, 0xFA0, 0xF0, 0x5F0, 0xAF0, 0xFF0,
-    0x5, 0x505, 0xA05, 0xF05, 0x55, 0x555, 0xA55, 0xF55,
-    0xA5, 0x5A5, 0xAA5, 0xFA5, 0xF5, 0x5F5, 0xAF5, 0xFF5,
-    0xA, 0x50A, 0xA0A, 0xF0A, 0x5A, 0x55A, 0xA5A, 0xF5A,
-    0xAA, 0x5AA, 0xAAA, 0xFAA, 0xFA, 0x5FA, 0xAFA, 0xFFA,
-    0xF, 0x50F, 0xA0F, 0xF0F, 0x5F, 0x55F, 0xA5F, 0xF5F,
-    0xAF, 0x5AF, 0xAAF, 0xFAF, 0xFF, 0x5FF, 0xAFF, 0xFFF};
-#endif // HSTX
+        // RGB555
+        int r5 = (r3 << 2) | (r3 >> 1);
+        int g5 = (g3 << 2) | (g3 >> 1);
+        int b5 = (b2 << 3) | (b2 << 1) | (b2 >> 1);
+        paletteLUT[i] = (r5 << 10) | (g5 << 5) | b5;
 #endif
-
-#define HEADER_OFFSET 0x7FF0
-#define HEADER_SIZE 16
-
-struct SegaHeader
-{
-    // 0x7FF0
-    char signature[8];
-    // 0x7FF8
-    uint16_t reserverd;
-    // 0x7FFA
-    uint16_t checksum;
-    // 0x7FFC
-    uint8_t product_code[2];
-    // 0x7FFE
-    uint8_t ProductCodeAndVersion;
-    // 0x7FFF
-    uint8_t sizeAndRegion;
-} *header;
-bool detect_rom_type_from_memory(uintptr_t addr, int *size, bool *isGameGear)
-{
-    char *rom = (char *)addr;
-    int actualSize = 0;
-    header = (SegaHeader *)(rom + HEADER_OFFSET);
-    if (strncmp(header->signature, "TMR SEGA", 8) == 0)
-    {
-        printf("Sega header found\n");
-
-        uint8_t romsize = header->sizeAndRegion & 0b00001111;
-        uint8_t region = (header->sizeAndRegion >> 4) & 0b00001111;
-        // https://www.smspower.org/Development/ROMHeader
-        switch (romsize)
-        {
-        case 0:                 // 256KB
-            *size = 512 * 1024; // 512KB and 1MB Roms are reported in the header as 256KB.
-                                // Setting Rom size to 512KB also works for 256KB roms.
-            break;              // Setting rom size to 1MB for 256 or 512KB games does not work.
-                                // Only a small set of roms are 1MB.
-        case 1:
-            *size = 512 * 1024;
-            break;
-        case 2:
-            *size = 1024 * 1024;
-            break;
-        case 0xa:
-            *size = 8 * 1024;
-            break;
-        case 0xb:
-            *size = 16 * 1024;
-            break;
-        case 0xc:
-            *size = 32 * 1024;
-            break;
-        case 0xd:
-            *size = 48 * 1024;
-            break;
-        case 0xe:
-            *size = 64 * 1024;
-            break;
-        case 0xf:
-            *size = 128 * 1024;
-            break;
-        default:
-            printf("Unknown romsize %x\n", romsize);
-            *size = 0; // unknown size
-            break;
-        }
-        printf("Romsize %x = %d bytes\n", romsize, *size);
-#if PICO_RP2350 && PSRAM_CS_PIN
-        // If PSRAM is used, get the actual size of the allocated block to determine the actual size of the rom.
-        if (Frens::isPsramEnabled())
-        {
-            printf("PSRAM enabled, getting size of allocated block\n");
-            PicoPlusPsram &psram_ = PicoPlusPsram::getInstance();
-            printf("Size in rom: %d bytes, ", *size);
-            *size = psram_.GetSize((void *)rom);
-            printf("actual size in PSRAM: %d bytes\n", *size);
-            printf("Setting rom size to %d bytes\n", *size);
-        }
-#endif
-
-        *isGameGear = false;
-
-        printf("Region: %x - ", region);
-        switch (region)
-        {
-        case 3:
-            printf("SMS Japan\n");
-            *isGameGear = false;
-            break;
-        case 4:
-            printf("SMS Export\n");
-            *isGameGear = false;
-            break;
-        case 5:
-            printf("GG USA\n");
-            *isGameGear = true;
-            break;
-        case 6:
-            printf("GG Export\n");
-            *isGameGear = true;
-            break;
-        case 7:
-            printf("GG International\n");
-            *isGameGear = true;
-            break;
-        default:
-            printf("Unknown\n");
-            break;
-        }
     }
-    if (*size > 0)
+}
+
+static int16_t pce_audio_buffer[PCE_SAMPLES_PER_FRAME * 2]; // stereo interleaved
+
+static inline void convertScanline(uint16_t *dst, int y, int y_offset, int screen_h,
+                                   int x_offset, int screen_w)
+{
+    if (y >= y_offset && y < y_offset + screen_h)
     {
-        return true;
+        uint8_t *src = &pce_framebuffer[(y - y_offset) * XBUF_WIDTH];
+        if (x_offset > 0)
+            memset(dst, 0, x_offset * sizeof(uint16_t));
+        for (int x = 0; x < screen_w; x++)
+            dst[x + x_offset] = paletteLUT[src[x]];
+        if (x_offset + screen_w < 320)
+            memset(dst + x_offset + screen_w, 0, (320 - x_offset - screen_w) * sizeof(uint16_t));
     }
     else
     {
-        return false;
+        memset(dst, 0, 320 * sizeof(uint16_t));
     }
 }
 
-#if !HSTX
-#define DVILOGDROPPEDSAMPLES 0
-static void inline processaudioPerFrameDVI()
-{
-    auto &ring = dvi_->getAudioRingBuffer();
-    int totalSamples = snd.bufsize;
-    int written = 0;
+#define AUDIO_SAMPLES_PER_SCANLINE 4
 
-    while (written < totalSamples)
-    {
-        int n = std::min<int>(totalSamples - written, ring.getWritableSize());
-        if (n == 0)
-        {
-#if DVILOGDROPPEDSAMPLES
-            static int dropped = 0;
-            dropped += (totalSamples - written);
-            if (dropped % 100 == 0)
-            {
-                printf("DVI audio buffer full, dropping samples! Total dropped: %d\n", dropped);
-            }
-#endif
-            break; // Buffer full, can't write more
-        }
-        auto p = ring.getWritePointer();
-        for (int i = 0; i < n; ++i)
-        {
-            int l = snd.buffer[0][written + i];
-            int r = snd.buffer[1][written + i];
-            *p++ = {static_cast<short>(l), static_cast<short>(r)};
-        }
-        ring.advanceWritePointer(n);
-        written += n;
-    }
-}
-#else // !HSTX
-static void inline processaudioPerFrameHSTX() {
-     for (int i = 0; i < snd.bufsize; i++)
-    {
-        short l = snd.buffer[0][i];
-        short r = snd.buffer[1][i];
-        hstx_push_audio_sample(l >> 2, r >> 2);
-#if ENABLE_VU_METER
-        if (settings.flags.enableVUMeter)
-        {
-            addSampleToVUMeter(l);
-        }
-#endif
-    }
-}
-#endif
-static void inline processaudioPerFrameI2S()
+static void __not_in_flash_func(convertAndDisplayFrame)()
 {
-    for (int i = 0; i < snd.bufsize; i++)
-    {
-        short l = snd.buffer[0][i];
-        short r = snd.buffer[1][i];
-        EXT_AUDIO_ENQUEUE_SAMPLE(l >> 2, r >> 2);
-#if ENABLE_VU_METER
-        if (settings.flags.enableVUMeter)
-        {
-            addSampleToVUMeter(l);
-        }
-#endif
-    }
-}
-// Don't process audio per line, but per frame
-#if 0
-int sampleIndex = 0;
-void in_ram(processaudio)(int offset)
-{
-    int samples = 4; // 735/192 = 3.828125 192*4=768 735/3=245
-    if (offset == (IS_GG ? 24 : 0))
-    {
-        sampleIndex = 0;
-    }
-    else
-    {
-        sampleIndex += samples;
-        if (sampleIndex >= 735)
-        {
-            return;
-        }
-    }
-    short *p1 = snd.buffer[0] + sampleIndex;
-    short *p2 = snd.buffer[1] + sampleIndex;
-#if !HSTX
-    while (samples)
-    {
-        auto &ring = dvi_->getAudioRingBuffer();
-        auto n = std::min<int>(samples, ring.getWritableSize());
-        if (!n)
-        {
-            return;
-        }
-        auto p = ring.getWritePointer();
-        int ct = n;
-        while (ct--)
-        {
-            int l = *p1++; // (*p1++ << 16) + *p2++;
-            // works also : int l = (*p1++ + *p2++) / 2;
-            int r = *p2++;
-            // int l = *wave1++;
+    int screen_w = PCE.VDC.screen_width;
+    int screen_h = PCE.VDC.screen_height;
+
+    if (screen_w > 320) screen_w = 320;
+    if (screen_h > 240) screen_h = 240;
+
+    int x_offset = (320 - screen_w) / 2;
+    int y_offset = (240 - screen_h) / 2;
+    int audio_idx = 0;
+
+#if HSTX
 #if EXT_AUDIO_IS_ENABLED
-            if (settings.flags.useExtAudio)
-            {
-                // uint32_t sample32 = (l << 16) | (r & 0xFFFF);
+    const bool routeToExtAudio = settings.flags.useExtAudio == 1 || Frens::isHeadPhoneJackConnected();
+#endif
+    for (int y = 0; y < 240; y++)
+    {
+        convertScanline(hstx_getlineFromFramebuffer(y), y, y_offset, screen_h, x_offset, screen_w);
+        for (int a = 0; a < AUDIO_SAMPLES_PER_SCANLINE && audio_idx < PCE_SAMPLES_PER_FRAME; a++, audio_idx++)
+        {
+            int16_t l = pce_audio_buffer[audio_idx * 2];
+            int16_t r = pce_audio_buffer[audio_idx * 2 + 1];
+#if ENABLE_VU_METER
+            if (settings.flags.enableVUMeter)
+                addSampleToVUMeter(l);
+#endif
+#if EXT_AUDIO_IS_ENABLED
+            if (routeToExtAudio)
                 EXT_AUDIO_ENQUEUE_SAMPLE(l, r);
-            }
             else
-            {
-                *p++ = {static_cast<short>(l), static_cast<short>(r)};
-            }
-#else
-            *p++ = {static_cast<short>(l), static_cast<short>(r)};
 #endif
+                hstx_push_audio_sample(l, r);
         }
-#if EXT_AUDIO_IS_ENABLED
-        if (!settings.flags.useExtAudio)
-        {
-            ring.advanceWritePointer(n);
-        }
-#else
-        ring.advanceWritePointer(n);
-#endif
-        samples -= n;
     }
-#else
-    for (int i = 0; i < samples; i++)
-    {
-        int l = *p1++; // (*p1++ << 16) + *p2++;
-        // works also : int l = (*p1++ + *p2++) / 2;
-        int r = *p2++;
-        // int l = *wave1++;
-        // int r = l;
-        EXT_AUDIO_ENQUEUE_SAMPLE(l, r);
-#if ENABLE_VU_METER
-        if (settings.flags.enableVUMeter)
-        {
-            addSampleToVUMeter(l);
-        }
-#endif
-    }
-#endif
-}
-#endif
-
-extern "C" void in_ram(sms_palette_syncGG)(int index)
-{
-    // The GG has a different palette format
-    int r = ((vdp.cram[(index << 1) | 0] >> 1) & 7) << 5;
-    int g = ((vdp.cram[(index << 1) | 0] >> 5) & 7) << 5;
-    int b = ((vdp.cram[(index << 1) | 1] >> 1) & 7) << 5;
-#if !HSTX
-    int r444 = ((r << 4) + 127) >> 8; // equivalent to (r888 * 15 + 127) / 255
-    int g444 = ((g << 4) + 127) >> 8; // equivalent to (g888 * 15 + 127) / 255
-    int b444 = ((b << 4) + 127) >> 8;
-    palette444[index] = (r444 << 8) | (g444 << 4) | b444;
-#else
-    int r555 = ((r << 5) + 127) >> 8; // equivalent to (r888 * 31 + 127) / 255
-    int g555 = ((g << 5) + 127) >> 8; // equivalent to (g888 * 31 + 127) / 255
-    int b555 = ((b << 5) + 127) >> 8;
-
-    palette444[index] = (r555 << 10) | (g555 << 5) | b555;
-#endif
-    return;
-}
-
-extern "C" void in_ram(sms_palette_sync)(int index)
-{
-#if 0
-    // Get SMS palette color index from CRAM
-    WORD r = ((vdp.cram[index] >> 0) & 3);
-    WORD g = ((vdp.cram[index] >> 2) & 3);
-    WORD b = ((vdp.cram[index] >> 4) & 3);
-    WORD tableIndex = b << 4 | g << 2 | r;
-    // Get the RGB444 color from the SMS RGB444 palette
-    palette444[index] = SMSPaletteRGB[tableIndex];
-#endif
-#if 1
-    // Alternative color rendering below
-    WORD r = ((vdp.cram[index] >> 0) & 3) << 6;
-    WORD g = ((vdp.cram[index] >> 2) & 3) << 6;
-    WORD b = ((vdp.cram[index] >> 4) & 3) << 6;
-
-#if !HSTX
-    int r444 = ((r << 4) + 127) >> 8; // equivalent to (r888 * 15 + 127) / 255
-    int g444 = ((g << 4) + 127) >> 8; // equivalent to (g888 * 15 + 127) / 255
-    int b444 = ((b << 4) + 127) >> 8;
-    palette444[index] = (r444 << 8) | (g444 << 4) | b444;
-#else
-    int r555 = ((r << 5) + 127) >> 8; // equivalent to (r888 * 31 + 127) / 255
-    int g555 = ((g << 5) + 127) >> 8; // equivalent to (g888 * 31 + 127) / 255
-    int b555 = ((b << 5) + 127) >> 8;
-    palette444[index] = (r555 << 10) | (g555 << 5) | b555;
-#endif
-#endif
-    return;
-}
-
-extern "C" void in_ram(sms_render_line)(int line, const uint8_t *buffer)
-{
-    // DVI top margin has #MARGINTOP lines
-    // DVI bottom margin has #MARGINBOTTOM lines
-    // DVI usable screen estate: MARGINTOP .. (240 - #MARGINBOTTOM)
-    // SMS has 192 lines
-    // GG  has 144 lines
-    // gg : Line starts at line 24
-    // sms: Line starts at line 0
-    // Emulator loops from scanline 0 to 261
-    // Audio processing is per frame, not per line
-#if 0
-#if !HSTX
-#if EXT_AUDIO_IS_ENABLED
-    // i2s_audio will be output per frame if external audio is enabled
-    if (settings.flags.useExtAudio == 0)
-    {
-        processaudio(line);
-    }
-#else
-    processaudio(line);
-#endif
-#endif
-#endif
-    // Adjust line number to center the emulator display
-    line += MARGINTOP;
-    // Only render lines that are visible on the screen, keeping into account top and bottom margins
-    if (line < MARGINTOP || line >= 240 - MARGINBOTTOM)
-        return;
-    uint16_t *sbuffer;
-    uint16_t *currentLineBuf = nullptr;
-#if !HSTX
-    dvi::DVI::LineBuffer *b{};
+#elif !HSTX
 #if FRAMEBUFFERISPOSSIBLE
     if (Frens::isFrameBufferUsed())
     {
-        currentLineBuf = &Frens::framebuffer[line * 320];
-        sbuffer = currentLineBuf + 32 + (IS_GG ? 48 : 0);
-        if (buffer)
+        for (int y = 0; y < 240; y++)
         {
-            for (int i = screenCropX ; i < BMP_WIDTH - screenCropX; i++)
+            convertScanline(&Frens::framebuffer[y * 320], y, y_offset, screen_h, x_offset, screen_w);
+#if EXT_AUDIO_IS_ENABLED
+            if (settings.flags.useExtAudio == 1 || Frens::isHeadPhoneJackConnected())
             {
-                sbuffer[i - screenCropX] = palette444[(buffer[i + BMP_X_OFFSET]) & 31];
+                for (int a = 0; a < AUDIO_SAMPLES_PER_SCANLINE && audio_idx < PCE_SAMPLES_PER_FRAME; a++, audio_idx++)
+                    EXT_AUDIO_ENQUEUE_SAMPLE(pce_audio_buffer[audio_idx * 2], pce_audio_buffer[audio_idx * 2 + 1]);
+            }
+            else
+#endif
+            {
+                auto &ring = dvi_->getAudioRingBuffer();
+                int avail = std::min<int>(AUDIO_SAMPLES_PER_SCANLINE, PCE_SAMPLES_PER_FRAME - audio_idx);
+                avail = std::min<int>(avail, ring.getWritableSize());
+                if (avail > 0)
+                {
+                    auto p = ring.getWritePointer();
+                    for (int a = 0; a < avail; a++, audio_idx++)
+                        *p++ = {static_cast<short>(pce_audio_buffer[audio_idx * 2]),
+                                static_cast<short>(pce_audio_buffer[audio_idx * 2 + 1])};
+                    ring.advanceWritePointer(avail);
+                }
             }
         }
     }
     else
     {
 #endif
-        b = dvi_->getLineBuffer();
-        currentLineBuf = b->data();
-        if (buffer)
+        for (int y = 0; y < 240; y++)
         {
-            uint16_t *sbuffer = b->data() + 32 + (IS_GG ? 48 : 0);
-            for (int i = screenCropX; i < BMP_WIDTH - screenCropX; i++)
+            auto *b = dvi_->getLineBuffer();
+            uint16_t *dst = b->data();
+            convertScanline(dst, y, y_offset, screen_h, x_offset, screen_w);
+            dvi_->setLineBuffer(y, b);
+#if EXT_AUDIO_IS_ENABLED
+            if (settings.flags.useExtAudio == 1 || Frens::isHeadPhoneJackConnected())
             {
-                sbuffer[i - screenCropX] = palette444[(buffer[i + BMP_X_OFFSET]) & 31];
+                for (int a = 0; a < AUDIO_SAMPLES_PER_SCANLINE && audio_idx < PCE_SAMPLES_PER_FRAME; a++, audio_idx++)
+                    EXT_AUDIO_ENQUEUE_SAMPLE(pce_audio_buffer[audio_idx * 2], pce_audio_buffer[audio_idx * 2 + 1]);
+            }
+            else
+#endif
+            {
+                auto &ring = dvi_->getAudioRingBuffer();
+                int avail = std::min<int>(AUDIO_SAMPLES_PER_SCANLINE, PCE_SAMPLES_PER_FRAME - audio_idx);
+                avail = std::min<int>(avail, ring.getWritableSize());
+                if (avail > 0)
+                {
+                    auto p = ring.getWritePointer();
+                    for (int a = 0; a < avail; a++, audio_idx++)
+                        *p++ = {static_cast<short>(pce_audio_buffer[audio_idx * 2]),
+                                static_cast<short>(pce_audio_buffer[audio_idx * 2 + 1])};
+                    ring.advanceWritePointer(avail);
+                }
             }
         }
-        else
-        {
-            sbuffer = b->data() + 32;
-            __builtin_memset(sbuffer, 0, 512);
-        }
-#else
-    currentLineBuf = hstx_getlineFromFramebuffer(line);
-    sbuffer = currentLineBuf + 32 + (IS_GG ? 48 : 0);
-    if (buffer)
-    {
-        for (int i = screenCropX ; i < BMP_WIDTH - screenCropX; i++)
-        {
-            sbuffer[i - screenCropX] = palette444[(buffer[i + BMP_X_OFFSET]) & 31];
-        }
-    }
-#endif
-#if !HSTX
 #if FRAMEBUFFERISPOSSIBLE
     }
 #endif
 #endif
-    // Display frame rate
-    if (settings.flags.displayFrameRate && line >= FPSSTART && line < FPSEND)
+
+    // Display frame rate overlay
+    if (settings.flags.displayFrameRate)
     {
-        WORD *fpsBuffer = currentLineBuf + 40;
-        int rowInChar = line % 8;
-        for (auto i = 0; i < 2; i++)
+        for (int line = FPSSTART; line < FPSEND; line++)
         {
-            char firstFpsDigit = fpsString[i];
-            char fontSlice = getcharslicefrom8x8font(firstFpsDigit, rowInChar);
-            for (auto bit = 0; bit < 8; bit++)
+            WORD *fpsBuffer = nullptr;
+#if HSTX
+            fpsBuffer = hstx_getlineFromFramebuffer(line) + 4;
+#elif FRAMEBUFFERISPOSSIBLE
+            if (Frens::isFrameBufferUsed())
+                fpsBuffer = &Frens::framebuffer[line * 320] + 4;
+#endif
+            if (fpsBuffer)
             {
-                if (fontSlice & 1)
+                int rowInChar = line % 8;
+                for (int i = 0; i < 2; i++)
                 {
-                    *fpsBuffer++ = fpsfgcolor;
+                    char fontSlice = getcharslicefrom8x8font(fpsString[i], rowInChar);
+                    for (int bit = 0; bit < 8; bit++)
+                    {
+                        if (fontSlice & 1)
+                            *fpsBuffer++ = fpsfgcolor;
+                        else
+                            *fpsBuffer++ = fpsbgcolor;
+                        fontSlice >>= 1;
+                    }
                 }
-                else
-                {
-                    *fpsBuffer++ = fpsbgcolor;
-                }
-                fontSlice >>= 1;
             }
         }
     }
-
-#if !HSTX
-#if FRAMEBUFFERISPOSSIBLE
-    if (!Frens::isFrameBufferUsed())
-    {
-#endif
-        assert(currentLineBuffer_);
-        dvi_->setLineBuffer(line, b);
-#if FRAMEBUFFERISPOSSIBLE
-    }
-#endif
-#endif
-    return;
 }
 
-void system_load_sram(void)
+// OSD callbacks required by pce-go
+extern "C" uint8_t *osd_gfx_framebuffer(int width, int height)
 {
-    char pad[FF_MAX_LFN];
-    FILINFO fno;
-    char fileName[FF_MAX_LFN];
-    strcpy(fileName, Frens::GetfileNameFromFullPath(romName));
-    Frens::stripextensionfromfilename(fileName);
-
-    snprintf(pad, FF_MAX_LFN, "%s/%s.SAV", GAMESAVEDIR, fileName);
-
-    FIL fil;
-    FRESULT fr;
-
-    size_t bytesRead;
-    if (!sms.sram)
-    {
-        snprintf(ErrorMessage, ERRORMESSAGESIZE, "sms.sram is NULL, cannot load SRAM");
-        printf("%s\n", ErrorMessage);
-        return;
-    }
-    printf("Load SRAM from %s\n", pad);
-    fr = f_stat(pad, &fno);
-    if (fr == FR_NO_FILE)
-    {
-        printf("No save file found, skipping load.\n");
-        return;
-    }
-    if (fr != FR_OK)
-    {
-        snprintf(ErrorMessage, ERRORMESSAGESIZE, "f_stat() failed on save file: %d", fr);
-        printf("%s\n", ErrorMessage);
-        return;
-    }
-    if (fno.fsize != SRAMSIZEBYTES)
-    {
-        snprintf(ErrorMessage, ERRORMESSAGESIZE, "Save file size mismatch: %d != %d", fno.fsize, SRAMSIZEBYTES);
-        printf("%s\n", ErrorMessage);
-        return;
-    }
-
-    printf("Loading save file %s\n", pad);
-    fr = f_open(&fil, pad, FA_READ);
-    if (fr == FR_OK)
-    {
-        fr = f_read(&fil, sms.sram, SRAMSIZEBYTES, &bytesRead);
-        if (fr == FR_OK)
-        {
-            printf("Savefile read from disk %d bytes\n", bytesRead);
-            sms.save = 1;
-        }
-        else
-        {
-            snprintf(ErrorMessage, ERRORMESSAGESIZE, "Cannot read save file: %d %d/%d read", fr, bytesRead, SRAMSIZEBYTES);
-            printf("%s\n", ErrorMessage);
-        }
-    }
-    else
-    {
-        snprintf(ErrorMessage, ERRORMESSAGESIZE, "Cannot open save file: %d", fr);
-        printf("%s\n", ErrorMessage);
-    }
-    f_close(&fil);
+    return pce_framebuffer;
 }
 
-void system_save_sram()
+extern "C" void osd_vsync(void)
 {
-    char pad[FF_MAX_LFN];
-    char fileName[FF_MAX_LFN];
-    printf("system_save_sram: Saving SRAM\n");
-    strcpy(fileName, Frens::GetfileNameFromFullPath(romName));
-    Frens::stripextensionfromfilename(fileName);
-    if (!sms.save)
-    {
-        printf("SRAM not updated.\n");
-        return;
-    }
-    snprintf(pad, FF_MAX_LFN, "%s/%s.SAV", GAMESAVEDIR, fileName);
-    printf("Save SRAM to %s\n", pad);
-    FIL fil;
-    FRESULT fr;
-    fr = f_open(&fil, pad, FA_CREATE_ALWAYS | FA_WRITE);
-    if (fr != FR_OK)
-    {
-        snprintf(ErrorMessage, ERRORMESSAGESIZE, "Cannot open save file: %d", fr);
-        printf("%s\n", ErrorMessage);
-        return;
-    }
-    size_t bytesWritten;
-    fr = f_write(&fil, sms.sram, SRAMSIZEBYTES, &bytesWritten);
-    if (bytesWritten < SRAMSIZEBYTES)
-    {
-        snprintf(ErrorMessage, ERRORMESSAGESIZE, "Error writing save: %d %d/%d written", fr, bytesWritten, SRAMSIZEBYTES);
-        printf("%s\n", ErrorMessage);
-    }
-    f_close(&fil);
-    printf("done\n");
+    // Conversion is done explicitly in the main loop via convertAndDisplayFrame()
 }
 
-void loadoverlay()
+extern "C" void osd_input_read(uint8_t joypads[8])
 {
-#if PICO_RP2350
-    if (!Frens::isFrameBufferUsed())
-    {
-        return;
-    }
-    char CRC[9];
-    static const char *borderdirs = "ABCDEFGHIJKLMNOPQRSTUVWY";
-    static char PATH[FF_MAX_LFN + 1];
-    static char CHOSEN[FF_MAX_LFN + 1];
-    // only Game Gear has default overlay
-    char *overlay = isGameGear ?
-#if !HSTX
-                               (char *)EmuOverlay_444
-                               :
-#else
-                               (char *)EmuOverlay_555
-                               :
-#endif
-                               nullptr;
-    // int fldIndex;
-    // if (settings.flags.borderMode == DEFAULTBORDER)
-    // {
-
-    //     Frens::loadOverLay(nullptr, overlay);
-    //     return;
-    // }
-
-    // if (settings.flags.borderMode == THEMEDBORDER)
-    // {
-    snprintf(CRC, sizeof(CRC), "%08X", Frens::getCrcOfLoadedRom());
-    snprintf(CHOSEN, (FF_MAX_LFN + 1) * sizeof(char), "/metadata/SMS/Images/Bezels/%c/%s%s", CRC[0], CRC, FILEXTFORSEARCH);
-    printf("Loading bezel: %s\n", CHOSEN);
-    //}
-    // else
-    // {
-    //     fldIndex = (rand() % strlen(borderdirs));
-    //     snprintf(PATH, (FF_MAX_LFN + 1) * sizeof(char), "/metadata/SMS/Images/Borders/%c", borderdirs[fldIndex]);
-    //     printf("Scanning random folder: %s\n", PATH);
-    //     FRESULT fr = Frens::pick_random_file_fullpath(PATH, CHOSEN, (FF_MAX_LFN + 1) * sizeof(char));
-    //     if (fr != FR_OK)
-    //     {
-    //         printf("Failed to pick random file from %s: %d\n", PATH, fr);
-    //         Frens::loadOverLay(nullptr, overlay);
-    //         return;
-    //     }
-    // }
-    Frens::loadOverLay(CHOSEN, overlay);
-#endif
+    // Input is read explicitly in the main loop
 }
 
 static inline int ProcessAfterFrameIsRendered()
 {
     Frens::pollHeadPhoneJack();
     Frens::PaceFrames60fps(false);
-    //Frens::waitForVSync();
 #if NES_PIN_CLK != -1
     nespad_read_start();
 #endif
@@ -743,14 +334,11 @@ static inline int ProcessAfterFrameIsRendered()
     auto onOff = hw_divider_s32_quotient_inlined(count, 60) & 1;
     Frens::blinkLed(onOff);
 #if NES_PIN_CLK != -1
-    nespad_read_finish(); // Sets global nespad_state var
+    nespad_read_finish();
 #endif
-    // nespad_read_finish(); // Sets global nespad_state var
     tuh_task();
-    // Frame rate calculation
     if (settings.flags.displayFrameRate)
     {
-        // calculate fps and round to nearest value (instead of truncating/floor)
         uint32_t tick_us = Frens::time_us() - start_tick_us;
         fps = (1000000 - 1) / tick_us + 1;
         start_tick_us = Frens::time_us();
@@ -758,15 +346,12 @@ static inline int ProcessAfterFrameIsRendered()
         fpsString[1] = '0' + (fps % 10);
     }
 #if WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
-    // Poll Wii pad once per frame (function called once per rendered frame)
     wiipad_raw_cached = wiipad_read();
 #endif
 #if ENABLE_VU_METER
     if (isVUMeterToggleButtonPressed())
     {
         settings.flags.enableVUMeter = !settings.flags.enableVUMeter;
-        // FrensSettings::savesettings();
-        // printf("VU Meter %s\n", settings.flags.enableVUMeter ? "enabled" : "disabled");
         turnOffAllLeds();
     }
 #endif
@@ -788,11 +373,10 @@ static inline int ProcessAfterFrameIsRendered()
             loadSaveStateMenu = true;
             quickSaveAction = SaveStateTypes::NONE;
         }
-        if ( rval == 5)
+        if (rval == 5)
         {
             reset = resetGame = true;
         }
-        loadoverlay();
     }
     if (loadSaveStateMenu)
     {
@@ -800,7 +384,7 @@ static inline int ProcessAfterFrameIsRendered()
         {
             if (framesbeforeAutoStateIsLoaded > 0)
             {
-                --framesbeforeAutoStateIsLoaded; // let the emulator run for a few frames before loading state
+                --framesbeforeAutoStateIsLoaded;
             }
         }
         else
@@ -809,7 +393,6 @@ static inline int ProcessAfterFrameIsRendered()
         }
         if (framesbeforeAutoStateIsLoaded == 0)
         {
-
             char msg[24];
             snprintf(msg, sizeof(msg), "CRC %08X", Frens::getCrcOfLoadedRom());
             if (showSaveStateMenu(Emulator_SaveState, Emulator_LoadState, msg, quickSaveAction) == false)
@@ -817,19 +400,10 @@ static inline int ProcessAfterFrameIsRendered()
                 reset = true;
             };
             loadSaveStateMenu = false;
-             loadoverlay();
         }
-       
     }
     return count;
 }
-
-static DWORD prevButtons[2]{};
-static DWORD prevButtonssystem[2]{};
-static DWORD prevOtherButtons[2]{};
-
-#define OTHER_BUTTON1 (0b1)
-#define OTHER_BUTTON2 (0b10)
 
 #define NESPAD_SELECT (0x04)
 #define NESPAD_START (0x08)
@@ -840,14 +414,25 @@ static DWORD prevOtherButtons[2]{};
 #define NESPAD_A (0x01)
 #define NESPAD_B (0x02)
 
-void processinput(DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem, bool ignorepushed, char *gamepadType)
+static DWORD prevButtons[2]{};
+static DWORD prevButtonssystem[2]{};
+static DWORD prevOtherButtons[2]{};
+
+#define OTHER_BUTTON1 (0b1)
+#define OTHER_BUTTON2 (0b10)
+
+// PCE button definitions (from pce-go.h):
+// JOY_A=0x01, JOY_B=0x02, JOY_SELECT=0x04, JOY_RUN=0x08
+// JOY_UP=0x10, JOY_RIGHT=0x20, JOY_DOWN=0x40, JOY_LEFT=0x80
+
+void readInputAndMapToPCE(DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem, bool ignorepushed, char *gamepadType)
 {
-    // pwdPad1 and pwdPad2 are only used in menu and are only set on first push
     *pdwPad1 = *pdwPad2 = *pdwSystem = 0;
 
-    int smssystem[2]{};
+    int pcesystem[2]{};
     unsigned long pushed, pushedsystem, pushedother;
     bool usbConnected = false;
+
     for (int i = 0; i < 2; i++)
     {
         int nespadbuttons = 0;
@@ -857,112 +442,92 @@ void processinput(DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem, bool ignorep
         {
             usbConnected = gp.isConnected();
             if (gamepadType)
-            {
                 strcpy(gamepadType, gp.GamePadName);
-            }
         }
-        int smsbuttons = (gp.buttons & io::GamePadState::Button::LEFT ? INPUT_LEFT : 0) |
-                         (gp.buttons & io::GamePadState::Button::RIGHT ? INPUT_RIGHT : 0) |
-                         (gp.buttons & io::GamePadState::Button::UP ? INPUT_UP : 0) |
-                         (gp.buttons & io::GamePadState::Button::DOWN ? INPUT_DOWN : 0) |
-                         (gp.buttons & io::GamePadState::Button::A ? INPUT_BUTTON1 : 0) |
-                         (gp.buttons & io::GamePadState::Button::B ? INPUT_BUTTON2 : 0) | 0;
+
+        int pcebuttons = (gp.buttons & io::GamePadState::Button::LEFT ? JOY_LEFT : 0) |
+                         (gp.buttons & io::GamePadState::Button::RIGHT ? JOY_RIGHT : 0) |
+                         (gp.buttons & io::GamePadState::Button::UP ? JOY_UP : 0) |
+                         (gp.buttons & io::GamePadState::Button::DOWN ? JOY_DOWN : 0) |
+                         (gp.buttons & io::GamePadState::Button::A ? JOY_A : 0) |
+                         (gp.buttons & io::GamePadState::Button::B ? JOY_B : 0) | 0;
+
         int otherButtons = (gp.buttons & io::GamePadState::Button::X ? OTHER_BUTTON1 : 0) |
                            (gp.buttons & io::GamePadState::Button::Y ? OTHER_BUTTON2 : 0) | 0;
-        smssystem[i] =
-            (gp.buttons & io::GamePadState::Button::SELECT ? INPUT_PAUSE : 0) |
-            (gp.buttons & io::GamePadState::Button::START ? INPUT_START : 0) |
-            0;
+
+        pcesystem[i] =
+            (gp.buttons & io::GamePadState::Button::SELECT ? JOY_SELECT : 0) |
+            (gp.buttons & io::GamePadState::Button::START ? JOY_RUN : 0) | 0;
 
 #if NES_PIN_CLK != -1
-        // When USB controller is connected both NES ports act as controller 2
         if (usbConnected)
         {
             if (i == 1)
-            {
                 nespadbuttons = nespadbuttons | nespad_states[1] | nespad_states[0];
-            }
         }
         else
         {
             nespadbuttons |= nespad_states[i];
         }
 #endif
-// When USB controller is connected  wiipad acts as controller 2
 #if WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
         if (usbConnected)
         {
             if (i == 1)
-            {
                 nespadbuttons |= wiipad_raw_cached;
-            }
         }
-        else // if no USB controller is connected, wiipad acts as controller 1
+        else
         {
             if (i == 0)
-            {
                 nespadbuttons |= wiipad_raw_cached;
-            }
         }
 #endif
         if (nespadbuttons > 0)
         {
-            smsbuttons |= ((nespadbuttons & NESPAD_UP ? INPUT_UP : 0) |
-                           (nespadbuttons & NESPAD_DOWN ? INPUT_DOWN : 0) |
-                           (nespadbuttons & NESPAD_LEFT ? INPUT_LEFT : 0) |
-                           (nespadbuttons & NESPAD_RIGHT ? INPUT_RIGHT : 0) |
-                           (nespadbuttons & NESPAD_A ? INPUT_BUTTON1 : 0) |
-                           (nespadbuttons & NESPAD_B ? INPUT_BUTTON2 : 0) | 0);
-            smssystem[i] |= ((nespadbuttons & NESPAD_SELECT ? INPUT_PAUSE : 0) |
-                             (nespadbuttons & NESPAD_START ? INPUT_START : 0) | 0);
+            pcebuttons |= ((nespadbuttons & NESPAD_UP ? JOY_UP : 0) |
+                           (nespadbuttons & NESPAD_DOWN ? JOY_DOWN : 0) |
+                           (nespadbuttons & NESPAD_LEFT ? JOY_LEFT : 0) |
+                           (nespadbuttons & NESPAD_RIGHT ? JOY_RIGHT : 0) |
+                           (nespadbuttons & NESPAD_A ? JOY_A : 0) |
+                           (nespadbuttons & NESPAD_B ? JOY_B : 0) | 0);
+            pcesystem[i] |= ((nespadbuttons & NESPAD_SELECT ? JOY_SELECT : 0) |
+                             (nespadbuttons & NESPAD_START ? JOY_RUN : 0) | 0);
         }
 
-        // if (gp.buttons & io::GamePadState::Button::SELECT) printf("SELECT\n");
-        // if (gp.buttons & io::GamePadState::Button::START) printf("START\n");
-        input.pad[i] = smsbuttons;
-        auto p1 = smssystem[i];
+        // Write combined buttons to PCE joypad registers
+        PCE.Joypad.regs[i] = pcebuttons | pcesystem[i];
+
+        auto p1 = pcesystem[i];
         if (ignorepushed == false)
         {
-            pushed = smsbuttons & ~prevButtons[i];
-            pushedsystem = smssystem[i] & ~prevButtonssystem[i];
+            pushed = pcebuttons & ~prevButtons[i];
+            pushedsystem = pcesystem[i] & ~prevButtonssystem[i];
             pushedother = otherButtons & ~prevOtherButtons[i];
         }
         else
         {
-            pushed = smsbuttons;
-            pushedsystem = smssystem[i];
+            pushed = pcebuttons;
+            pushedsystem = pcesystem[i];
             pushedother = otherButtons;
         }
-        if (p1 & INPUT_PAUSE)
+
+        // SELECT + RUN -> settings menu
+        if (p1 & JOY_SELECT)
         {
-            if (pushedsystem & INPUT_START)
+            if (pushedsystem & JOY_RUN)
             {
-                // system_save_sram();
-                // reset = true;
-                // printf("Reset pressed\n");
                 FrensSettings::savesettings();
                 showSettings = true;
             }
-            else if (pushed & INPUT_LEFT)
+            else if (pushed & JOY_LEFT)
             {
-                // Toggle audio output, ignore if HSTX is enabled, because HSTX must use external audio
 #if EXT_AUDIO_IS_ENABLED && !HSTX
                 settings.flags.useExtAudio = !settings.flags.useExtAudio;
-                if (settings.flags.useExtAudio)
-                {
-                    printf("Using I2S Audio\n");
-                }
-                else
-                {
-                    printf("Using DVIAudio\n");
-                }
-
 #else
                 settings.flags.useExtAudio = 0;
 #endif
-                //FrensSettings::savesettings();
             }
-            else if (pushed & INPUT_UP)
+            else if (pushed & JOY_UP)
             {
 #if !HSTX
                 scaleMode8_7_ = Frens::screenMode(-1);
@@ -970,7 +535,7 @@ void processinput(DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem, bool ignorep
                 Frens::toggleScanLines();
 #endif
             }
-            else if (pushed & INPUT_DOWN)
+            else if (pushed & JOY_DOWN)
             {
 #if !HSTX
                 scaleMode8_7_ = Frens::screenMode(+1);
@@ -979,51 +544,45 @@ void processinput(DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem, bool ignorep
 #endif
             }
 #if ENABLE_VU_METER
-            else if (pushed & INPUT_RIGHT)
+            else if (pushed & JOY_RIGHT)
             {
                 settings.flags.enableVUMeter = !settings.flags.enableVUMeter;
-                //FrensSettings::savesettings();
-                // printf("VU Meter %s\n", settings.flags.enableVUMeter ? "enabled" : "disabled");
                 turnOffAllLeds();
             }
 #endif
         }
-        if (p1 & INPUT_START)
+        // RUN + button combos
+        if (p1 & JOY_RUN)
         {
-            // Toggle frame rate display
-            if (pushed & INPUT_BUTTON1)
+            if (pushed & JOY_A)
             {
                 settings.flags.displayFrameRate = !settings.flags.displayFrameRate;
-                printf("FPS: %s\n", settings.flags.displayFrameRate ? "ON" : "OFF");
-                // FrensSettings::savesettings();
             }
-            else if (pushed & INPUT_BUTTON2)
+            else if (pushed & JOY_B)
             {
 #if PICO_RP2350
                 if (Frens::isPsramEnabled() && !SoundRecorder::isRecording())
-                {
                     SoundRecorder::startRecording();
-                }
 #endif
             }
-            else if (pushed & INPUT_UP)
+            else if (pushed & JOY_UP)
             {
                 loadSaveStateMenu = true;
                 quickSaveAction = SaveStateTypes::LOAD;
             }
-            else if (pushed & INPUT_DOWN)
+            else if (pushed & JOY_DOWN)
             {
                 loadSaveStateMenu = true;
                 quickSaveAction = SaveStateTypes::SAVE;
             }
-            else if (pushed & INPUT_LEFT)
+            else if (pushed & JOY_LEFT)
             {
 #if HW_CONFIG == 8
                 settings.fruitjamVolumeLevel = std::max(-63, settings.fruitjamVolumeLevel - 1);
                 EXT_AUDIO_SETVOLUME(settings.fruitjamVolumeLevel);
 #endif
             }
-            else if (pushed & INPUT_RIGHT)
+            else if (pushed & JOY_RIGHT)
             {
 #if HW_CONFIG == 8
                 settings.fruitjamVolumeLevel = std::min(23, settings.fruitjamVolumeLevel + 1);
@@ -1031,136 +590,96 @@ void processinput(DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem, bool ignorep
 #endif
             }
         }
-        prevButtons[i] = smsbuttons;
-        prevButtonssystem[i] = smssystem[i];
+
+        prevButtons[i] = pcebuttons;
+        prevButtonssystem[i] = pcesystem[i];
         prevOtherButtons[i] = otherButtons;
-        // return only on first push
         if (pushed)
-        {
-            dst = smsbuttons;
-        }
+            dst = pcebuttons;
         if (pushedother)
         {
             if (pushedother & OTHER_BUTTON1)
-            {
                 printf("Other 1\n");
-            }
             if (pushedother & OTHER_BUTTON2)
-            {
                 printf("Other 2\n");
-            }
         }
     }
-    input.system = *pdwSystem = smssystem[0] | smssystem[1];
-    // return only on first push
+    *pdwSystem = pcesystem[0] | pcesystem[1];
     if (reset)
     {
-        system_save_sram();
-    }
-    if (pushedsystem)
-    {
-        *pdwSystem = smssystem[0] | smssystem[1];
+        // No SRAM to save for PCE (battery-backed RAM handled differently)
     }
 }
-//static DWORD *OLD_Pad1 = nullptr;
-void in_ram(process)(void)
-{
 
-    DWORD pdwPad1, pdwPad2, pdwSystem; // have only meaning in menu
-    // print address of pwdPad1 for debugging purposes
-    //printf("pwdPad1 address: %p\n", (void *)&pdwPad1);
-    // if (OLD_Pad1 != nullptr)
-    // {
-    //     // calculate offset between old and new address
-    //     ptrdiff_t offset = (char *)&pdwPad1 - (char *)OLD_Pad1;
-    //     printf("Offset between old and new pwdPad1: %ld bytes\n",offset);
-    // }
-    // OLD_Pad1 = &pdwPad1;
+void __not_in_flash_func(process)(void)
+{
+    DWORD pdwPad1, pdwPad2, pdwSystem;
     while (reset == false)
     {
-        processinput(&pdwPad1, &pdwPad2, &pdwSystem, false, nullptr);
-        sms_frame(0);
-#if EXT_AUDIO_IS_ENABLED
-        if (settings.flags.useExtAudio == 1 || Frens::isHeadPhoneJackConnected())
-        {
-            processaudioPerFrameI2S();
-        } else
-#endif
-        {
-#if !HSTX
-            processaudioPerFrameDVI();
-#else
-       
-            processaudioPerFrameHSTX();
-#endif 
-        }
+        readInputAndMapToPCE(&pdwPad1, &pdwPad2, &pdwSystem, false, nullptr);
+        pce_run();
+        psg_update(pce_audio_buffer, PCE_SAMPLES_PER_FRAME, 0x3F);
+        convertAndDisplayFrame();
         ProcessAfterFrameIsRendered();
     }
 }
 
 static char selectedRom[FF_MAX_LFN];
-/// @brief
-/// Start emulator. Emulator does not run well in DEBUG mode, lots of red screen flicker. In order to keep it running fast enough, we need to run it in release mode or in
-/// RelWithDebugInfo mode.
-/// @return
+
 int main()
 {
-
     romName = selectedRom;
     ErrorMessage[0] = selectedRom[0] = 0;
 
     int fileSize = 0;
-    isGameGear = false;
 
     Frens::setClocksAndStartStdio(CPUFreqKHz, VREG_VOLTAGE_1_20);
 
     printf("==========================================================================================\n");
-    printf("Pico-SMS+ %s\n", SWVERSION);
+    printf("Pico-PCE+ %s\n", SWVERSION);
     printf("Build date: %s\n", __DATE__);
     printf("Build time: %s\n", __TIME__);
     printf("CPU freq: %d kHz\n", clock_get_hz(clk_sys) / 1000);
     printf("Stack size: %d bytes\n", PICO_STACK_SIZE);
     printf("==========================================================================================\n");
     printf("Starting up...\n");
-    FrensSettings::initSettings(FrensSettings::emulators::SMS);
-    // Note:
-    //     - When using framebuffer, AUDIOBUFFERSIZE must be increased to 1024
-    //     - Top and bottom margins are reset to zero
-    isFatalError = !Frens::initAll(selectedRom, CPUFreqKHz, MARGINTOP, MARGINBOTTOM, AUDIOBUFFERSIZE, false, true);
+
+    FrensSettings::initSettings(FrensSettings::emulators::PCE);
+    isFatalError = !Frens::initAll(selectedRom, CPUFreqKHz, 0, 0, AUDIOBUFFERSIZE, false, true);
 #if !HSTX
     scaleMode8_7_ = Frens::applyScreenMode(settings.screenMode);
 #else
     hstx_setScanLines(settings.flags.scanlineOn);
 #endif
+
+    buildPaletteLUT();
+
     bool showSplash = true;
-    g_settings_visibility = g_settings_visibility_sms;
-    g_available_screen_modes = g_available_screen_modes_sms;
+    g_settings_visibility = g_settings_visibility_pce;
+    g_available_screen_modes = g_available_screen_modes_pce;
+
     while (true)
     {
-        #if 1
         if (strlen(selectedRom) == 0 || reset == true)
         {
-            menu("Pico-SMS+", ErrorMessage, isFatalError, showSplash, ".sms .gg", selectedRom);
-            // returns only when PSRAM is enabled,
+            menu("Pico-PCE+", ErrorMessage, isFatalError, showSplash, ".pce", selectedRom);
             printf("Selected rom from menu: %s\n", selectedRom);
         }
-        #endif
         reset = false;
         fileSize = 0;
-        isGameGear = false;
-        //EXT_AUDIO_MUTE_INTERNAL_SPEAKER(settings.flags.fruitJamEnableInternalSpeaker == 0);
+
         if (Frens::isPsramEnabled())
         {
-            // Detect rom type from memory
-            // This is used to determine the rom size and type (SMS or GG)
-            detect_rom_type_from_memory(ROM_FILE_ADDR, &fileSize, &isGameGear);
+#if PICO_RP2350 && PSRAM_CS_PIN
+            PicoPlusPsram &psram_ = PicoPlusPsram::getInstance();
+            fileSize = psram_.GetSize((void *)ROM_FILE_ADDR);
             if (fileSize == 0)
             {
-                // No rom loaded, continue to menu
                 printf("No rom loaded, continuing to menu\n");
                 selectedRom[0] = 0;
                 continue;
             }
+#endif
         }
         else
         {
@@ -1169,60 +688,47 @@ int main()
             fr = f_open(&file, selectedRom, FA_READ);
             if (fr != FR_OK)
             {
-                snprintf(ErrorMessage, 40, "Cannot open rom %d", fr);
+                snprintf(ErrorMessage, ERRORMESSAGESIZE, "Cannot open rom %d", fr);
                 printf("%s\n", ErrorMessage);
                 selectedRom[0] = 0;
                 continue;
             }
             fileSize = f_size(&file);
             f_close(&file);
-            isGameGear = Frens::cstr_endswith(selectedRom, ".gg");
-            printf("Now playing: %s (%d bytes)\n", selectedRom, fileSize);
         }
-        if (isGameGear)
-        {
-            printf("Game Gear rom detected\n");
-        }
-        else
-        {
-            printf("Master System rom detected\n");
-        }
+
+        printf("Now playing: %s (%d bytes)\n", selectedRom, fileSize);
+
         if (isAutoSaveStateConfigured())
         {
             char tmpPath[40];
             getAutoSaveStatePath(tmpPath, sizeof(tmpPath));
-            printf("Auto-save is configured found for this ROM (%s)\n", tmpPath);
             if (Frens::fileExists(tmpPath))
             {
-                printf("Auto-save state found for this ROM (%s)\n", tmpPath);
-                printf("Loading auto-save state...\n");
+                printf("Auto-save state found: %s\n", tmpPath);
                 loadSaveStateMenu = true;
                 quickSaveAction = SaveStateTypes::LOAD_AND_START;
-                framesbeforeAutoStateIsLoaded = 120; // wait 2 seconds before loading auto state
-            }
-            else
-            {
-                printf("No auto-save state found for this ROM.\n");
+                framesbeforeAutoStateIsLoaded = 120;
             }
         }
-        else
+
+        do
         {
-            printf("No auto-save configured for this ROM.\n");
-        }
-        do {
             reset = resetGame = false;
-            loadoverlay();
-            load_rom(ROM_FILE_ADDR, fileSize, isGameGear); 
-            // Initialize all systems and power on
-            system_init(SMS_AUD_RATE);
-            // load state if any
-            // system_load_state();
-            system_reset();
+            InitPCE(PCE_AUDIO_RATE, true);
+            if (LoadCard((uint8_t *)ROM_FILE_ADDR, fileSize) != 0)
+            {
+                snprintf(ErrorMessage, ERRORMESSAGESIZE, "ROM load failed");
+                printf("%s\n", ErrorMessage);
+                break;
+            }
             printf("Starting game\n");
-            Frens::PaceFrames60fps(true); 
+            Frens::PaceFrames60fps(true);
             process();
-            system_shutdown();
+            PCE.ROM = NULL; // prevent ShutdownPCE from freeing flash/PSRAM
+            ShutdownPCE();
         } while (resetGame);
+
         selectedRom[0] = 0;
         showSplash = false;
 #if ENABLE_VU_METER

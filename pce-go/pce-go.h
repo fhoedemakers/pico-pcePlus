@@ -80,6 +80,22 @@ int LoadCard(uint8_t *data, size_t size);
 int LoadFile(const char *name);
 void *PalettePCE(int bitdepth);
 
+typedef struct __attribute__((packed))
+{
+	char key[12];
+	uint32_t type:8;
+	uint32_t len:24;
+} block_hdr_t;
+
+typedef const struct
+{
+	block_hdr_t desc;
+	void *ptr;
+} save_var_t;
+
+extern const char SAVESTATE_HEADER[8];
+extern save_var_t SaveStateVars[];
+
 extern uint8_t *osd_gfx_framebuffer(int width, int height);
 extern void osd_input_read(uint8_t joypads[8]);
 extern void osd_vsync(void);

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "pico.h"
 #include "pce-go.h"
 #include "pce.h"
 
@@ -50,8 +51,7 @@ h6280_irq(int type)
 /**
  * CPU emulation
  **/
-void
-h6280_run(int max_cycles)
+void __not_in_flash_func(h6280_run)(int max_cycles)
 {
 	/* Handle active block transfers, ie: do nothing. (tai/tdd/tia/tin/tii) */
 	if (Cycles >= max_cycles) {

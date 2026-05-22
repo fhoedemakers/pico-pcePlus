@@ -20,21 +20,8 @@
 #define SVAR_P(k, v, n) { {k, 5, n}, &v }
 #define SVAR_END { {"END", 0, 0}, NULL }
 
-typedef struct __attribute__((packed))
-{
-	char key[12];
-	uint32_t type:8;
-	uint32_t len:24;
-} block_hdr_t;
-
-typedef const struct
-{
-	block_hdr_t desc;
-	void *ptr;
-} save_var_t;
-
-static const char SAVESTATE_HEADER[8] = "PCE_V010";
-static save_var_t SaveStateVars[] =
+const char SAVESTATE_HEADER[8] = "PCE_V010";
+save_var_t SaveStateVars[] =
 {
 	// Arrays
 	SVAR_P("RAM", PCE.RAM, 0x2000),             SVAR_P("VRAM", PCE.VRAM, 0x10000),

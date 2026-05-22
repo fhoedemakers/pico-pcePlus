@@ -2,6 +2,7 @@
 //
 #include <stdlib.h>
 #include <string.h>
+#include "pico.h"
 #include "pce.h"
 #include "gfx.h"
 
@@ -25,8 +26,7 @@ static uint8_t *framebuffer_top, *framebuffer_bottom;
 /*
 	Draw background tiles between two lines
 */
-static void
-draw_tiles(uint8_t *screen_buffer, int Y1, int Y2, int scroll_x, int scroll_y)
+static void __not_in_flash_func(draw_tiles)(uint8_t *screen_buffer, int Y1, int Y2, int scroll_x, int scroll_y)
 {
 	TRACE_GFX("Rendering tiles on lines %3d - %3d\tScroll: (%3d,%3d)\n", Y1, Y2, scroll_x, scroll_y);
 
@@ -104,8 +104,7 @@ draw_tiles(uint8_t *screen_buffer, int Y1, int Y2, int scroll_x, int scroll_y)
 /*
 	Draw sprite C to framebuffer P
 */
-static void
-draw_sprite(uint8_t *P, const uint16_t *C, int height, uint32_t attr)
+static void __not_in_flash_func(draw_sprite)(uint8_t *P, const uint16_t *C, int height, uint32_t attr)
 {
 	uint8_t *PAL = &PCE.Palette[256 + ((attr & 0xF) << 4)];
 
@@ -195,8 +194,7 @@ draw_sprite(uint8_t *P, const uint16_t *C, int height, uint32_t attr)
 /*
 	Draw sprites between two lines
 */
-static void // Do not inline
-draw_sprites(uint8_t *screen_buffer, int Y1, int Y2, int priority)
+static void __not_in_flash_func(draw_sprites)(uint8_t *screen_buffer, int Y1, int Y2, int priority)
 {
 	TRACE_GFX("Rendering sprites on lines %3d - %3d\tPriority: %d\n", Y1, Y2, priority);
 
@@ -398,8 +396,7 @@ gfx_irq(int type)
 /*
 	Process one scanline
 */
-void
-gfx_run(void)
+void __not_in_flash_func(gfx_run)(void)
 {
 	int scanline = PCE.Scanline;
 

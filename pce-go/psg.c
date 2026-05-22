@@ -2,6 +2,7 @@
 //
 #include <stdlib.h>
 #include <string.h>
+#include "pico.h"
 #include "pce.h"
 #include "psg.h"
 
@@ -22,8 +23,7 @@ static int samplerate = 22050;
 static int stereo = true;
 
 
-static inline void
-psg_update_chan(sample_t *buf, int ch, size_t dwSize)
+static void __not_in_flash_func(psg_update_chan)(sample_t *buf, int ch, size_t dwSize)
 {
 	psg_chan_t *chan = &PCE.PSG.chan[ch];
 	int sample = 0;
@@ -65,15 +65,15 @@ psg_update_chan(sample_t *buf, int ch, size_t dwSize)
 		lvol = vol_tbl[lvol << 1];
 		rvol = vol_tbl[rvol << 1];
 
-		while (buf < buf_end && (chan->dda_count || chan->control & PSG_DDA_ENABLE)) {
+		int step = stereo ? 2 : 1;
+		while (buf + step <= buf_end && (chan->dda_count || chan->control & PSG_DDA_ENABLE)) {
 			if (chan->dda_count) {
-				// sample = chan->dda_data[(start++) & 0x7F];
 				if ((sample = (chan->dda_data[(start++) & 0xFF] - 16)) >= 0)
 					sample++;
 				chan->dda_count--;
 			}
 
-			for (int i = 0; i < repeat; i++) {
+			for (int i = 0; i < repeat && buf + step <= buf_end; i++) {
 				*buf++ = (sample * lvol);
 
 				if (stereo) {
@@ -191,8 +191,7 @@ psg_term(void)
 }
 
 
-void
-psg_update(int16_t *output, size_t length, uint32_t channels)
+void __not_in_flash_func(psg_update)(int16_t *output, size_t length, uint32_t channels)
 {
 	int lvol = (PCE.PSG.volume >> 4);
 	int rvol = (PCE.PSG.volume & 0x0F);
@@ -203,9 +202,10 @@ psg_update(int16_t *output, size_t length, uint32_t channels)
 
 	memset(output, 0, length * sizeof(int16_t));
 
+	static sample_t mix_buffer[((44100 / 60) * 2) + 2];
+
 	for (int i = 0; i < PSG_CHANNELS; i++)
 	{
-		sample_t mix_buffer[length + 1];
 		psg_update_chan(mix_buffer, i, length);
 
 		// We still emulate disabled channel, we just don't mix them with the output
@@ -213,8 +213,12 @@ psg_update(int16_t *output, size_t length, uint32_t channels)
 			continue;
 
 		for (int j = 0; j < length; j += 2) {
-			output[j] += mix_buffer[j] * lvol;
-			output[j + 1] += mix_buffer[j + 1] * rvol;
+			int sl = output[j] + mix_buffer[j] * lvol;
+			int sr = output[j + 1] + mix_buffer[j + 1] * rvol;
+			if (sl > 32767) sl = 32767; else if (sl < -32768) sl = -32768;
+			if (sr > 32767) sr = 32767; else if (sr < -32768) sr = -32768;
+			output[j] = sl;
+			output[j + 1] = sr;
 		}
 	}
 }
