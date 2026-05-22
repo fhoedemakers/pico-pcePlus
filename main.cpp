@@ -71,9 +71,9 @@ const int8_t g_settings_visibility_pce[MOPT_COUNT] = {
     0,                               // Exit Game
     0,                               // Reset Game
     0,                               // Save / Restore State
-    !HSTX,                           // Screen Mode (only when not HSTX)
-    HSTX,                            // Scanlines toggle (only when HSTX)
-    0,                               // Scanline type
+    1,                               // Screen Mode (1:1 / 8:7 x scanlines on/off)
+    0,                               // Scanlines toggle (superseded by Screen Mode)
+    HSTX,                            // Scanline type (HSTX only)
     1,                               // FPS Overlay
     0,                               // Audio Enable
     0,                               // Frame Skip
@@ -94,16 +94,8 @@ const int8_t g_settings_visibility_pce[MOPT_COUNT] = {
 };
 
 const uint8_t g_available_screen_modes_pce[] = {
-#if PICO_RP2350
-    0, // SCANLINE_8_7
-#else
-    1, // SCANLINE_8_7
-#endif
-#if PICO_RP2350
-    0, // NOSCANLINE_8_7
-#else
+    1, // SCANLINE_8_7    (HSTX stretches the centred 256-px content; 320-px modes auto-fall-back to 1:1)
     1, // NOSCANLINE_8_7
-#endif
     1, // SCANLINE_1_1
     1  // NOSCANLINE_1_1
 };
@@ -180,6 +172,17 @@ static void __not_in_flash_func(convertAndDisplayFrame)()
     int x_offset = (320 - screen_w) / 2;
     int y_offset = (240 - screen_h) / 2;
     int audio_idx = 0;
+
+#if HSTX
+    // The HSTX 8:7 stretch reads a centred 252-px window and is geometrically
+    // tuned for NES/PCE 256-px modes. For 320-px (or wider) PCE modes, that
+    // window crops content. Auto-fall-back to 1:1 when not in a 256-px mode.
+    static int last_screen_w = -1;
+    if (screen_w != last_screen_w) {
+        hstx_setAspectRatio87((scaleMode8_7_ && screen_w <= 256) ? 1 : 0);
+        last_screen_w = screen_w;
+    }
+#endif
 
 #if HSTX
 #if EXT_AUDIO_IS_ENABLED
@@ -646,11 +649,7 @@ int main()
 
     FrensSettings::initSettings(FrensSettings::emulators::PCE);
     isFatalError = !Frens::initAll(selectedRom, CPUFreqKHz, 0, 0, AUDIOBUFFERSIZE, false, true);
-#if !HSTX
     scaleMode8_7_ = Frens::applyScreenMode(settings.screenMode);
-#else
-    hstx_setScanLines(settings.flags.scanlineOn);
-#endif
 
     buildPaletteLUT();
 
