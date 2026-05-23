@@ -20,6 +20,7 @@
 
 // Persistent BIN file handle, allocated from PSRAM while a disc is open.
 static FIL *bin_fil = NULL;
+static char current_bin_name[CD_BIN_NAME_MAX];
 
 // C-side allocator wrappers from pico_shared/FrensHelpers.cpp. They route to
 // PSRAM via lwmem when available and fall back to plain malloc otherwise.
@@ -28,6 +29,15 @@ extern void  frens_f_free(void *ptr);
 
 // Global CD state (zero-initialized).
 cd_state_t CD;
+
+// SCSI bus signal state
+static bool scsi_req = false;
+static bool scsi_ack = false;
+static uint8_t scsi_data_port = 0;
+static uint8_t scsi_read_port = 0;
+static bool    scsi_msg_done  = false;
+static uint8_t cdc_active_irqs = 0;
+static uint8_t cdc_reset_reg = 0;
 
 // ---------------------------------------------------------------------------
 // CRC32 (polynomial 0xEDB88320, standard / "le" variant). Self-contained so
@@ -126,13 +136,29 @@ cd_reset(void)
 	CD.sense_asc = 0;
 	CD.sense_ascq = 0;
 
+	CD.irq_mask = 0;
+
+	scsi_req = false;
+	scsi_ack = false;
+	scsi_data_port = 0;
+	scsi_read_port = 0;
+	scsi_msg_done = false;
+	cdc_active_irqs = 0;
+	cdc_reset_reg = 0;
+
 	CD.adpcm_ctrl = 0;
 	CD.adpcm_dma_ctrl = 0;
 	CD.adpcm_status = 0;
 	CD.adpcm_rate = 0;
 	CD.adpcm_fade = 0;
+	CD.adpcm_addr_port = 0;
+	CD.adpcm_read_addr = 0;
+	CD.adpcm_write_addr = 0;
+	CD.adpcm_length = 0;
+	CD.adpcm_read_buf = 0;
 
 	memset(CD.acd_port, 0, sizeof(CD.acd_port));
+	CD.acd_value = 0;
 	CD.acd_shift = 0;
 	CD.acd_rotate = 0;
 }
@@ -529,6 +555,7 @@ cd_close(void)
 		frens_f_free(bin_fil);
 		bin_fil = NULL;
 	}
+	current_bin_name[0] = '\0';
 	memset(CD.tracks, 0, sizeof(CD.tracks));
 	CD.num_tracks = 0;
 	CD.first_track = 0;
@@ -537,42 +564,726 @@ cd_close(void)
 }
 
 // ---------------------------------------------------------------------------
-// Register read/write dispatch ($1800-$1AFF on hardware page $FF).
-//
-// Step 4 implements:
-//   - Super System Card identification at $18C1/$18C2/$18C3/$18C5/$18C6
-//     (the BIOS needs this to acknowledge the 192KB SCD RAM at pages $68-$7F)
-//   - Arcade Card identification at $1AFE/$1AFF (games probe this; harmless
-//     to report present even without full ACD register handling yet).
-//
-// Everything else still returns 0xFF — the SCSI state machine, ADPCM port
-// registers, BRAM lock/unlock and the Arcade Card port windows are filled
-// in by Steps 5-9.
+// BIN file access (sector reads from disc image)
 // ---------------------------------------------------------------------------
+
+static uint8_t bin2bcd(uint8_t v) { return ((v / 10) << 4) | (v % 10); }
+static uint8_t bcd2bin(uint8_t v) { return (v >> 4) * 10 + (v & 0x0F); }
+
+static void lba_to_msf(uint32_t lba, uint8_t *m, uint8_t *s, uint8_t *f)
+{
+	lba += 150;
+	*f = lba % 75;
+	*s = (lba / 75) % 60;
+	*m = lba / 4500;
+}
+
+static int find_track(uint32_t lba)
+{
+	for (int i = 0; i < CD.num_tracks; i++) {
+		if (lba >= CD.tracks[i].lba_start && lba < CD.tracks[i].lba_end)
+			return i;
+	}
+	return -1;
+}
+
+static int scsi_cmd_length(uint8_t opcode)
+{
+	switch (opcode) {
+	case 0x00: case 0x08:
+		return 6;
+	case 0x03:
+		return 6;
+	case 0xD8: case 0xD9: case 0xDA: case 0xDD: case 0xDE:
+		return 10;
+	default:
+		return 0;
+	}
+}
+
+static int open_bin_for_track(int idx)
+{
+	cd_track_t *t = &CD.tracks[idx];
+	if (bin_fil && strcmp(current_bin_name, t->bin_name) == 0)
+		return 0;
+	if (bin_fil)
+		f_close(bin_fil);
+	else {
+		bin_fil = frens_f_malloc(sizeof(FIL));
+		if (!bin_fil) return -1;
+	}
+	static char path[256];
+	snprintf(path, sizeof(path), "%s%s", CD.cue_dir, t->bin_name);
+	if (f_open(bin_fil, path, FA_READ) != FR_OK) {
+		printf("CDC: open failed: %s\n", path);
+		current_bin_name[0] = '\0';
+		return -1;
+	}
+	strncpy(current_bin_name, t->bin_name, CD_BIN_NAME_MAX - 1);
+	current_bin_name[CD_BIN_NAME_MAX - 1] = '\0';
+	return 0;
+}
+
+static int read_sector(uint32_t lba)
+{
+	int idx = find_track(lba);
+	if (idx < 0) return -1;
+	cd_track_t *t = &CD.tracks[idx];
+	if (open_bin_for_track(idx) != 0) return -1;
+
+	uint32_t raw = t->sector_size ? CD_RAW_SECTOR_SIZE : CD_SECTOR_SIZE;
+	uint64_t off = t->bin_offset + (uint64_t)(lba - t->lba_start) * raw;
+	if (raw == CD_RAW_SECTOR_SIZE) off += 16;
+
+	if (f_lseek(bin_fil, off) != FR_OK) return -1;
+	UINT br;
+	if (f_read(bin_fil, CD.sector_buf, CD_SECTOR_SIZE, &br) != FR_OK
+	    || br != CD_SECTOR_SIZE)
+		return -1;
+	return 0;
+}
+
+// ---------------------------------------------------------------------------
+// SCSI command processing
+// ---------------------------------------------------------------------------
+
+static void cdc_enter_phase(cdc_phase_t phase);
+static void cdc_set_good_status(void);
+static void cdc_update_irqs(void);
+
+static void cdc_data_in(const uint8_t *data, uint32_t len)
+{
+	if (len > CD_SECTOR_SIZE) len = CD_SECTOR_SIZE;
+	memcpy(CD.sector_buf, data, len);
+	CD.data_index  = 0;
+	CD.data_length = len;
+	CD.read_remaining = 0;
+	cdc_enter_phase(CDC_PHASE_DATA_IN);
+}
+
+static void cdc_set_error(uint8_t key, uint8_t asc, uint8_t ascq)
+{
+	CD.sense_key  = key;
+	CD.sense_asc  = asc;
+	CD.sense_ascq = ascq;
+	CD.data_index = CD.data_length = 0;
+	CD.read_remaining = 0;
+	cdc_enter_phase(CDC_PHASE_STATUS);
+}
+
+static void cdc_process_command(void)
+{
+	uint8_t cmd = CD.scsi_command[0];
+
+	switch (cmd) {
+	case 0x00: // TEST UNIT READY
+		if (CD.num_tracks > 0) {
+			cdc_set_good_status();
+		} else {
+			cdc_set_error(0x02, 0x3A, 0x00);
+		}
+		break;
+
+	case 0x03: { // REQUEST SENSE
+		uint8_t sense[18];
+		memset(sense, 0, sizeof(sense));
+		sense[0]  = 0x70;
+		sense[2]  = CD.sense_key;
+		sense[7]  = 0x0A;
+		sense[12] = CD.sense_asc;
+		sense[13] = CD.sense_ascq;
+		CD.sense_key = CD.sense_asc = CD.sense_ascq = 0;
+		cdc_data_in(sense, 18);
+		break;
+	}
+
+	case 0x08: { // READ(6)
+		uint32_t lba = ((CD.scsi_command[1] & 0x1F) << 16)
+		             | (CD.scsi_command[2] << 8)
+		             | CD.scsi_command[3];
+		uint32_t count = CD.scsi_command[4];
+		if (count == 0) {
+			cdc_set_good_status();
+			break;
+		}
+
+		if (read_sector(lba) != 0) {
+			cdc_set_error(0x03, 0x11, 0x05);
+			break;
+		}
+		CD.read_lba       = lba + 1;
+		CD.read_remaining = count - 1;
+		CD.data_index  = 0;
+		CD.data_length = CD_SECTOR_SIZE;
+		cdc_enter_phase(CDC_PHASE_DATA_IN);
+		break;
+	}
+
+	case 0xD8: // SAPSP (play audio start — stub)
+	case 0xD9: // SAPEP (play audio end  — stub)
+	case 0xDA: // PAUSE                  — stub
+		cdc_set_good_status();
+		break;
+
+	case 0xDD: { // READ SUBQ
+		uint8_t subq[10];
+		memset(subq, 0, sizeof(subq));
+		subq[0] = CD.audio_status;
+		subq[1] = bin2bcd(CD.first_track);
+		subq[2] = 0x01;
+		uint8_t m, s, f;
+		lba_to_msf(0, &m, &s, &f);
+		subq[6] = bin2bcd(m);
+		subq[7] = bin2bcd(s);
+		subq[8] = bin2bcd(f);
+		cdc_data_in(subq, 10);
+		break;
+	}
+
+	case 0xDE: { // GET DIR INFO (TOC)
+		uint8_t sub = CD.scsi_command[1];
+		switch (sub) {
+		case 0x00: { // number of tracks
+			uint8_t r[4] = {
+				1,
+				bin2bcd(CD.num_tracks),
+				0, 0
+			};
+			cdc_data_in(r, 4);
+			break;
+		}
+		case 0x01: { // total disc length
+			uint8_t m, s, f;
+			lba_to_msf(CD.total_lba, &m, &s, &f);
+			uint8_t r[4] = { bin2bcd(m), bin2bcd(s), bin2bcd(f), 0 };
+			cdc_data_in(r, 4);
+			break;
+		}
+		case 0x02: { // track N start time
+			uint8_t raw = CD.scsi_command[2];
+			int trk_no = (raw == 0xAA) ? 0xAA : bcd2bin(raw);
+			if (trk_no == 0) trk_no = 1;
+
+			uint8_t r[4];
+			if (trk_no > CD.num_tracks) {
+				uint8_t m, s, f;
+				lba_to_msf(CD.total_lba, &m, &s, &f);
+				r[0] = bin2bcd(m);
+				r[1] = bin2bcd(s);
+				r[2] = bin2bcd(f);
+				r[3] = 0x04;
+			} else {
+				int found = -1;
+				for (int i = 0; i < CD.num_tracks; i++)
+					if (CD.tracks[i].track_no == trk_no)
+						{ found = i; break; }
+				if (found >= 0) {
+					uint8_t m, s, f;
+					lba_to_msf(CD.tracks[found].lba_start,
+					           &m, &s, &f);
+					r[0] = bin2bcd(m);
+					r[1] = bin2bcd(s);
+					r[2] = bin2bcd(f);
+					r[3] = CD.tracks[found].type ? 0x04 : 0x00;
+				} else {
+					memset(r, 0, 4);
+				}
+			}
+			cdc_data_in(r, 4);
+			break;
+		}
+		default:
+			cdc_set_error(0x05, 0x24, 0x00);
+			break;
+		}
+		break;
+	}
+
+	default:
+		cdc_set_good_status();
+		break;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// SCSI signal-based CDC model (matches Mesen2 / real HW behaviour)
+//
+// $1800 write = SEL pulse   → enter COMMAND phase
+// $1801 write = data port   → CPU places data on SCSI bus
+// $1802 write = ACK signal  → bit 7 drives REQ/ACK handshake;
+//                              bits 0-6 = IRQ enable mask
+// $1808 read  = data port with auto-ACK (DATA_IN bulk reads)
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Arcade Card port helpers (matching Mesen2 PceArcadeCard)
+// ---------------------------------------------------------------------------
+
+static uint32_t acd_get_address(int p)
+{
+	uint32_t addr = CD.acd_port[p].base;
+	if (CD.acd_port[p].add_offset) {
+		addr += CD.acd_port[p].offset;
+		if (CD.acd_port[p].sign_offset)
+			addr += 0xFF0000;
+	}
+	return addr & 0x1FFFFF;
+}
+
+static void acd_auto_inc(int p)
+{
+	if (!CD.acd_port[p].auto_inc) return;
+	if (CD.acd_port[p].inc_to_base)
+		CD.acd_port[p].base = (CD.acd_port[p].base
+		                     + CD.acd_port[p].increment) & 0xFFFFFF;
+	else
+		CD.acd_port[p].offset += CD.acd_port[p].increment;
+}
+
+static void acd_add_offset_to_base(int p)
+{
+	uint32_t a = CD.acd_port[p].base + CD.acd_port[p].offset;
+	if (CD.acd_port[p].sign_offset)
+		a += 0xFF0000;
+	CD.acd_port[p].base = a & 0xFFFFFF;
+}
+
+static uint8_t acd_read_port(uint8_t p, uint8_t reg)
+{
+	switch (reg) {
+	case 0x00:
+	case 0x01: {
+		uint32_t a = acd_get_address(p);
+		acd_auto_inc(p);
+		return CD.acd_ram[a];
+	}
+	case 0x02: return CD.acd_port[p].base & 0xFF;
+	case 0x03: return (CD.acd_port[p].base >> 8) & 0xFF;
+	case 0x04: return (CD.acd_port[p].base >> 16) & 0xFF;
+	case 0x05: return CD.acd_port[p].offset & 0xFF;
+	case 0x06: return (CD.acd_port[p].offset >> 8) & 0xFF;
+	case 0x07: return CD.acd_port[p].increment & 0xFF;
+	case 0x08: return (CD.acd_port[p].increment >> 8) & 0xFF;
+	case 0x09: return CD.acd_port[p].control;
+	case 0x0A: return 0;
+	}
+	return 0xFF;
+}
+
+static void acd_write_port(uint8_t p, uint8_t reg, uint8_t val)
+{
+	switch (reg) {
+	case 0x00:
+	case 0x01: {
+		uint32_t a = acd_get_address(p);
+		acd_auto_inc(p);
+		CD.acd_ram[a] = val;
+		break;
+	}
+	case 0x02:
+		CD.acd_port[p].base = (CD.acd_port[p].base & 0xFFFF00)
+		                    | val;
+		break;
+	case 0x03:
+		CD.acd_port[p].base = (CD.acd_port[p].base & 0xFF00FF)
+		                    | ((uint32_t)val << 8);
+		break;
+	case 0x04:
+		CD.acd_port[p].base = (CD.acd_port[p].base & 0x00FFFF)
+		                    | ((uint32_t)val << 16);
+		break;
+	case 0x05:
+		CD.acd_port[p].offset = (CD.acd_port[p].offset & 0xFF00) | val;
+		if (CD.acd_port[p].off_trigger == 1)
+			acd_add_offset_to_base(p);
+		break;
+	case 0x06:
+		CD.acd_port[p].offset = (CD.acd_port[p].offset & 0x00FF)
+		                      | ((uint16_t)val << 8);
+		if (CD.acd_port[p].off_trigger == 2)
+			acd_add_offset_to_base(p);
+		break;
+	case 0x07:
+		CD.acd_port[p].increment = (CD.acd_port[p].increment & 0xFF00)
+		                         | val;
+		break;
+	case 0x08:
+		CD.acd_port[p].increment = (CD.acd_port[p].increment & 0x00FF)
+		                         | ((uint16_t)val << 8);
+		break;
+	case 0x09:
+		CD.acd_port[p].control       = val & 0x7F;
+		CD.acd_port[p].auto_inc      = (val & 0x01) != 0;
+		CD.acd_port[p].add_offset    = (val & 0x02) != 0;
+		CD.acd_port[p].sign_offset   = (val & 0x08) != 0;
+		CD.acd_port[p].inc_to_base   = (val & 0x10) != 0;
+		CD.acd_port[p].off_trigger   = (val >> 5) & 0x03;
+		break;
+	case 0x0A:
+		if (CD.acd_port[p].off_trigger == 3)
+			acd_add_offset_to_base(p);
+		break;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Arcade Card bank $40-$43 memory-mapped access (called from pce_readIO/writeIO)
+
+uint8_t cd_acd_read_bank(uint8_t port)
+{
+	uint32_t a = acd_get_address(port);
+	acd_auto_inc(port);
+	return CD.acd_ram[a];
+}
+
+void cd_acd_write_bank(uint8_t port, uint8_t val)
+{
+	uint32_t a = acd_get_address(port);
+	acd_auto_inc(port);
+	CD.acd_ram[a] = val;
+}
+
+// Register read/write
+// ---------------------------------------------------------------------------
+
+// Forward declarations for DMA
+static void cdc_update_state(void);
+
+static void adpcm_set_end_reached(bool val)
+{
+	if (val) {
+		CD.adpcm_status |= 0x01;
+		cdc_active_irqs |= 0x08;
+	} else {
+		CD.adpcm_status &= ~0x01;
+		cdc_active_irqs &= ~0x08;
+	}
+	cdc_update_irqs();
+}
+
+static void adpcm_set_half_reached(bool val)
+{
+	if (val)
+		cdc_active_irqs |= 0x04;
+	else
+		cdc_active_irqs &= ~0x04;
+	cdc_update_irqs();
+}
+
+static bool adpcm_length_latch_enabled(void)
+{
+	return (CD.adpcm_ctrl & 0x10) != 0;
+}
+
+static void adpcm_process_write(uint8_t data)
+{
+	CD.adpcm_ram[CD.adpcm_write_addr++] = data;
+
+	if (CD.adpcm_length == 0)
+		adpcm_set_end_reached(true);
+	adpcm_set_half_reached(CD.adpcm_length < 0x8000);
+
+	if (!adpcm_length_latch_enabled())
+		CD.adpcm_length = (CD.adpcm_length + 1) & 0x1FFFF;
+}
+
+static void adpcm_run_dma(void)
+{
+	if (!(CD.adpcm_dma_ctrl & 0x03)) return;
+	if (CD.phase != CDC_PHASE_DATA_IN) return;
+	if (!scsi_req) return;
+	if (!CD.adpcm_ram) return;
+
+	while (scsi_req && CD.phase == CDC_PHASE_DATA_IN) {
+		CD.adpcm_ram[CD.adpcm_write_addr++] = scsi_read_port;
+		if (!adpcm_length_latch_enabled())
+			CD.adpcm_length = (CD.adpcm_length + 1) & 0x1FFFF;
+		scsi_ack = true;
+		cdc_update_state();
+		scsi_ack = false;
+		cdc_update_state();
+	}
+	CD.adpcm_dma_ctrl &= ~0x01;
+}
+
+static void cdc_update_irqs(void)
+{
+	uint8_t prev = cdc_active_irqs;
+
+	if (scsi_req && CD.phase != CDC_PHASE_COMMAND &&
+	    CD.phase != CDC_PHASE_IDLE) {
+		switch (CD.phase) {
+		case CDC_PHASE_STATUS:
+		case CDC_PHASE_MESSAGE:
+			cdc_active_irqs |=  0x20;
+			cdc_active_irqs &= ~0x40;
+			break;
+		case CDC_PHASE_DATA_IN:
+			cdc_active_irqs |=  0x40;
+			cdc_active_irqs &= ~0x20;
+			break;
+		default:
+			cdc_active_irqs &= ~(0x20 | 0x40);
+			break;
+		}
+	} else {
+		cdc_active_irqs &= ~(0x20 | 0x40);
+	}
+
+	if ((CD.irq_mask & cdc_active_irqs) != 0)
+		CPU.irq_lines |= INT_IRQ2;
+	else
+		CPU.irq_lines &= ~INT_IRQ2;
+}
+
+static void cdc_enter_phase(cdc_phase_t phase)
+{
+	CD.phase = phase;
+	scsi_req = false;
+	scsi_msg_done = false;
+
+	switch (phase) {
+	case CDC_PHASE_IDLE:
+		break;
+	case CDC_PHASE_COMMAND:
+		CD.scsi_cmd_idx = 0;
+		CD.read_remaining = 0;
+		scsi_req = true;
+		break;
+	case CDC_PHASE_DATA_IN:
+		if (CD.data_index < CD.data_length) {
+			scsi_read_port = CD.sector_buf[CD.data_index++];
+			scsi_req = true;
+		}
+		break;
+	// Note: adpcm_run_dma() is called after cdc_update_irqs() below
+	case CDC_PHASE_STATUS:
+		scsi_read_port = CD.sense_key ? 0x02 : 0x00;
+		scsi_req = true;
+		break;
+	case CDC_PHASE_MESSAGE:
+		scsi_read_port = 0x00;
+		scsi_req = true;
+		break;
+	default:
+		break;
+	}
+	cdc_update_irqs();
+	if (phase == CDC_PHASE_DATA_IN)
+		adpcm_run_dma();
+}
+
+static void cdc_set_good_status(void)
+{
+	CD.sense_key = CD.sense_asc = CD.sense_ascq = 0;
+	CD.data_index = CD.data_length = 0;
+	CD.read_remaining = 0;
+	cdc_enter_phase(CDC_PHASE_STATUS);
+}
+
+static void cdc_process_command_phase(void)
+{
+	if (scsi_req && scsi_ack) {
+		scsi_req = false;
+		if (CD.scsi_cmd_idx < sizeof(CD.scsi_command))
+			CD.scsi_command[CD.scsi_cmd_idx++] = scsi_data_port;
+		cdc_update_irqs();
+	} else if (!scsi_req && !scsi_ack && CD.scsi_cmd_idx > 0) {
+		uint8_t opcode = CD.scsi_command[0];
+		int cmd_size = scsi_cmd_length(opcode);
+		if (cmd_size == 0) {
+			cdc_set_good_status();
+		} else if (CD.scsi_cmd_idx >= (uint8_t)cmd_size) {
+			CD.scsi_cmd_len = CD.scsi_cmd_idx;
+			cdc_process_command();
+			cdc_update_irqs();
+		} else {
+			scsi_req = true;
+			cdc_update_irqs();
+		}
+	}
+}
+
+static void cdc_process_datain_phase(void)
+{
+	if (scsi_req && scsi_ack) {
+		scsi_req = false;
+		cdc_update_irqs();
+	} else if (!scsi_req && !scsi_ack) {
+		if (CD.data_index < CD.data_length) {
+			scsi_read_port = CD.sector_buf[CD.data_index++];
+			scsi_req = true;
+			cdc_update_irqs();
+		} else if (CD.read_remaining > 0) {
+			if (read_sector(CD.read_lba) == 0) {
+				CD.read_lba++;
+				CD.read_remaining--;
+				CD.data_index = 0;
+				CD.data_length = CD_SECTOR_SIZE;
+				scsi_read_port = CD.sector_buf[CD.data_index++];
+				scsi_req = true;
+				cdc_update_irqs();
+			} else {
+				cdc_set_error(0x03, 0x11, 0x05);
+				cdc_update_irqs();
+			}
+		} else {
+			cdc_set_good_status();
+		}
+	}
+}
+
+static void cdc_process_status_phase(void)
+{
+	if (scsi_req && scsi_ack) {
+		scsi_req = false;
+		cdc_update_irqs();
+	} else if (!scsi_req && !scsi_ack) {
+		cdc_enter_phase(CDC_PHASE_MESSAGE);
+	}
+}
+
+static void cdc_process_message_phase(void)
+{
+	if (scsi_req && scsi_ack) {
+		scsi_req = false;
+		scsi_msg_done = true;
+		cdc_update_irqs();
+	} else if (!scsi_req && !scsi_ack && scsi_msg_done) {
+		scsi_msg_done = false;
+		cdc_enter_phase(CDC_PHASE_IDLE);
+	}
+}
+
+static void cdc_update_state(void)
+{
+	switch (CD.phase) {
+	case CDC_PHASE_COMMAND:  cdc_process_command_phase(); break;
+	case CDC_PHASE_DATA_IN:  cdc_process_datain_phase();  break;
+	case CDC_PHASE_STATUS:   cdc_process_status_phase();  break;
+	case CDC_PHASE_MESSAGE:  cdc_process_message_phase(); break;
+	default: break;
+	}
+}
 
 uint8_t
 cd_read(uint16_t addr)
 {
-	// Only the low 12 bits matter; readIO/writeIO already filtered the high
-	// page (0xFF) and the $1Ann group is dispatched here too.
 	switch (addr) {
 
-	// --- Super System Card identification ($18C0-$18C6) ---
-	// The SC3 BIOS reads these to decide whether to enable extended RAM
-	// (pages $68-$7F). See pctech.txt §8.1: $18C5=$55 && $18C6=$AA selects
-	// the v3 path; $18C1=$AA && $18C2=$55 enables the v2 path as a fallback.
+	// --- $1800: SCSI bus status (signal-based) ---
+	case 0x1800: {
+		uint8_t s = 0;
+		switch (CD.phase) {
+		case CDC_PHASE_IDLE:     break;
+		case CDC_PHASE_COMMAND:  s = 0x90; break;  // BSY + CD
+		case CDC_PHASE_DATA_IN:  s = 0x88; break;  // BSY + IO
+		case CDC_PHASE_STATUS:   s = 0x98; break;  // BSY + CD + IO
+		case CDC_PHASE_MESSAGE:  s = 0xB8; break;  // BSY + MSG + CD + IO
+		default: break;
+		}
+		if (scsi_req) s |= 0x40;
+		return s;
+	}
+
+	// --- $1801: SCSI data port read (no auto-ACK) ---
+	case 0x1801:
+		switch (CD.phase) {
+		case CDC_PHASE_STATUS:
+		case CDC_PHASE_DATA_IN:
+		case CDC_PHASE_MESSAGE:
+			return scsi_read_port;
+		default:
+			return scsi_data_port;
+		}
+
+	// --- $1802: IRQ enable mask + ACK bit ---
+	case 0x1802:
+		return CD.irq_mask | (scsi_ack ? 0x80 : 0x00);
+
+	// --- $1803: active IRQs + BRAM lock ---
+	case 0x1803: {
+		uint8_t v = cdc_active_irqs;
+		CD.bram_locked = true;
+		return v;
+	}
+
+	case 0x1804: return 0x00;
+	case 0x1805: return 0x00;
+	case 0x1806: return 0x00;
+
+	// --- $1808: SCSI data port read WITH auto-ACK (DATA_IN) ---
+	case 0x1808: {
+		uint8_t v;
+		switch (CD.phase) {
+		case CDC_PHASE_STATUS:
+		case CDC_PHASE_DATA_IN:
+		case CDC_PHASE_MESSAGE:
+			v = scsi_read_port;
+			break;
+		default:
+			v = scsi_data_port;
+			break;
+		}
+		if (scsi_req && CD.phase == CDC_PHASE_DATA_IN) {
+			scsi_ack = true;
+			cdc_update_state();
+			scsi_ack = false;
+			cdc_update_state();
+		}
+		return v;
+	}
+
+	// --- ADPCM registers ---
+	case 0x180A: {
+		uint8_t v = CD.adpcm_read_buf;
+		if (CD.adpcm_ram) {
+			CD.adpcm_read_buf = CD.adpcm_ram[CD.adpcm_read_addr];
+			CD.adpcm_read_addr++;
+			if (!adpcm_length_latch_enabled()) {
+				if (CD.adpcm_length > 0) {
+					CD.adpcm_length--;
+					adpcm_set_half_reached(CD.adpcm_length < 0x8000);
+				} else {
+					adpcm_set_end_reached(true);
+					adpcm_set_half_reached(false);
+				}
+			}
+		}
+		return v;
+	}
+	case 0x180B: return CD.adpcm_dma_ctrl;
+	case 0x180C: return CD.adpcm_status;
+	case 0x180D: return 0x00;
+	case 0x180E: return CD.adpcm_rate;
+
+	// --- Super System Card identification ---
+	case 0x18C0: return 0x00;
 	case 0x18C1: return 0xAA;
 	case 0x18C2: return 0x55;
-	case 0x18C3: return 0x00;   // version / status byte (BIOS doesn't use)
-	case 0x18C5: return 0x55;
-	case 0x18C6: return 0xAA;
+	case 0x18C3: return 0x03;
 
-	// --- Arcade Card identification ($1AFE/$1AFF) ---
-	// $1AFE: bit 4 set => Arcade Card present. $1AFF: hardware version.
-	// We report 0x10 / 0x01 unconditionally on CD games so ACD-aware games
-	// can map their 2MB window. Full port-window handling is Step 9.
-	case 0x1AFE: return 0x10;
-	case 0x1AFF: return 0x01;
+	// --- Arcade Card registers ($1A00-$1AFF) ---
+	default:
+		if (addr >= 0x1A00 && addr <= 0x1AFF && CD.acd_ram) {
+			if (addr <= 0x1A7F) {
+				uint8_t port = (addr >> 4) & 0x03;
+				uint8_t reg  = addr & 0x0F;
+				return acd_read_port(port, reg);
+			}
+			switch (addr) {
+			case 0x1AE0: return CD.acd_value & 0xFF;
+			case 0x1AE1: return (CD.acd_value >> 8) & 0xFF;
+			case 0x1AE2: return (CD.acd_value >> 16) & 0xFF;
+			case 0x1AE3: return (CD.acd_value >> 24) & 0xFF;
+			case 0x1AE4: return CD.acd_shift;
+			case 0x1AE5: return CD.acd_rotate;
+			case 0x1AFE: return 0x10;
+			case 0x1AFF: return 0x51;
+			}
+		}
+		break;
 	}
 
 	return 0xFF;
@@ -581,8 +1292,157 @@ cd_read(uint16_t addr)
 void
 cd_write(uint16_t addr, uint8_t val)
 {
-	(void)addr;
-	(void)val;
+	switch (addr) {
+
+	// --- $1800: SCSI bus control — SEL pulse → enter COMMAND ---
+	case 0x1800:
+		if (CD.phase != CDC_PHASE_DATA_IN) {
+			cdc_enter_phase(CDC_PHASE_COMMAND);
+		} else {
+			cdc_set_good_status();
+		}
+		break;
+
+	// --- $1801: SCSI data port write ---
+	case 0x1801:
+		scsi_data_port = val;
+		break;
+
+	// --- $1802: ACK signal (bit 7) + IRQ enable mask (bits 0-6) ---
+	case 0x1802: {
+		bool new_ack = (val & 0x80) != 0;
+		if (new_ack != scsi_ack) {
+			scsi_ack = new_ack;
+			cdc_update_state();
+		}
+		CD.irq_mask = val & 0x7F;
+		cdc_update_irqs();
+		break;
+	}
+
+	// --- $1804: CDC reset ---
+	case 0x1804:
+		cdc_reset_reg = val & 0x0F;
+		if (val & 0x02) {
+			CD.phase = CDC_PHASE_IDLE;
+			CD.scsi_cmd_idx = 0;
+			CD.data_index = CD.data_length = 0;
+			CD.read_remaining = 0;
+			scsi_req = false;
+			scsi_ack = false;
+			scsi_msg_done = false;
+			cdc_active_irqs = 0;
+			CD.irq_mask &= 0x8F;
+			cdc_update_irqs();
+		}
+		break;
+
+	// --- $1807: BRAM unlock ---
+	case 0x1807:
+		if (val & 0x80) CD.bram_locked = false;
+		break;
+
+	// --- $1808/$1809: ADPCM address port ---
+	case 0x1808:
+		CD.adpcm_addr_port = (CD.adpcm_addr_port & 0xFF00) | val;
+		break;
+	case 0x1809:
+		CD.adpcm_addr_port = (CD.adpcm_addr_port & 0x00FF)
+		                   | ((uint16_t)val << 8);
+		break;
+
+	// --- ADPCM data write ---
+	case 0x180A:
+		if (CD.adpcm_ram)
+			adpcm_process_write(val);
+		break;
+
+	// --- ADPCM control ---
+	case 0x180B:
+		CD.adpcm_dma_ctrl = val;
+		adpcm_run_dma();
+		break;
+	case 0x180D: {
+		uint8_t prev = CD.adpcm_ctrl;
+		if ((val & 0x02) && !(prev & 0x02))
+			CD.adpcm_write_addr = CD.adpcm_addr_port
+			                    - ((val & 0x01) ? 0 : 1);
+		if ((val & 0x08) && !(prev & 0x08))
+			CD.adpcm_read_addr = CD.adpcm_addr_port
+			                   - ((val & 0x04) ? 0 : 1);
+		CD.adpcm_ctrl = val;
+		if (val & 0x10) {
+			CD.adpcm_length = CD.adpcm_addr_port;
+			adpcm_set_end_reached(false);
+		}
+		if (val & 0x80) {
+			CD.adpcm_read_addr = 0;
+			CD.adpcm_write_addr = 0;
+			CD.adpcm_addr_port = 0;
+			CD.adpcm_length = 0;
+			CD.adpcm_status = 0;
+			CD.adpcm_read_buf = 0;
+			adpcm_set_end_reached(false);
+			adpcm_set_half_reached(false);
+		}
+		break;
+	}
+	case 0x180E: CD.adpcm_rate = val; break;
+	case 0x180F: CD.adpcm_fade = val; break;
+
+	// --- Arcade Card registers ($1A00-$1AFF) ---
+	default:
+		if (addr >= 0x1A00 && addr <= 0x1AFF && CD.acd_ram) {
+			if (addr <= 0x1A7F) {
+				uint8_t port = (addr >> 4) & 0x03;
+				uint8_t reg  = addr & 0x0F;
+				acd_write_port(port, reg, val);
+			} else {
+				switch (addr) {
+				case 0x1AE0:
+					CD.acd_value = (CD.acd_value & 0xFFFFFF00u)
+					             | val;
+					break;
+				case 0x1AE1:
+					CD.acd_value = (CD.acd_value & 0xFFFF00FFu)
+					             | ((uint32_t)val << 8);
+					break;
+				case 0x1AE2:
+					CD.acd_value = (CD.acd_value & 0xFF00FFFFu)
+					             | ((uint32_t)val << 16);
+					break;
+				case 0x1AE3:
+					CD.acd_value = (CD.acd_value & 0x00FFFFFFu)
+					             | ((uint32_t)val << 24);
+					break;
+				case 0x1AE4:
+					CD.acd_shift = val;
+					if (val) {
+						if (val & 0x08)
+							CD.acd_value >>= (~val & 0x07) + 1;
+						else
+							CD.acd_value <<= (val & 0x07);
+					}
+					break;
+				case 0x1AE5:
+					CD.acd_rotate = val;
+					if (val) {
+						if (val & 0x08) {
+							uint8_t r = (~val & 0x07) + 1;
+							CD.acd_value = (CD.acd_value >> r)
+							             | (CD.acd_value << (32 - r));
+						} else {
+							uint8_t r = val & 0x07;
+							CD.acd_value = (CD.acd_value << r)
+							             | (CD.acd_value >> (32 - r));
+						}
+					}
+					break;
+				}
+			}
+		}
+		break;
+	}
 }
 
 void
@@ -611,20 +1471,42 @@ cd_setup_memory_map(void)
 		PCE.MemoryMapW[0xF7] = CD.bram;
 	}
 
-	// Arcade Card RAM is *not* memory-mapped; it is accessed only through
-	// the $1A00-$1AFF I/O port window (Step 9).
+	// Arcade Card banks $40-$43: map to IOAREA so reads/writes are
+	// intercepted by pce_readIO/pce_writeIO and routed to cd_acd_read_bank.
+	if (CD.acd_ram) {
+		for (int i = 0x40; i <= 0x43; i++) {
+			PCE.MemoryMapR[i] = PCE.IOAREA;
+			PCE.MemoryMapW[i] = PCE.IOAREA;
+		}
+	}
 }
 
 int
 cd_bram_save(const char *path)
 {
-	(void)path;
-	return -1;
+	static FIL fil;
+	if (!CD.bram || !path) return -1;
+	if (f_open(&fil, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK)
+		return -1;
+	UINT bw;
+	FRESULT r = f_write(&fil, CD.bram, 0x800, &bw);
+	f_close(&fil);
+	if (r != FR_OK || bw != 0x800) return -1;
+	printf("BRAM: saved to %s\n", path);
+	return 0;
 }
 
 int
 cd_bram_load(const char *path)
 {
-	(void)path;
-	return -1;
+	static FIL fil;
+	if (!CD.bram || !path) return -1;
+	if (f_open(&fil, path, FA_READ) != FR_OK)
+		return -1;
+	UINT br;
+	FRESULT r = f_read(&fil, CD.bram, 0x800, &br);
+	f_close(&fil);
+	if (r != FR_OK || br != 0x800) return -1;
+	printf("BRAM: loaded from %s\n", path);
+	return 0;
 }

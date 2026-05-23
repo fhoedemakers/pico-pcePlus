@@ -68,9 +68,11 @@ typedef struct {
 
 	// ADPCM (registers only in Phase 1, no playback)
 	uint8_t  *adpcm_ram;        // 64KB in PSRAM
+	uint16_t adpcm_addr_port;   // address port ($1808/$1809)
 	uint16_t adpcm_read_addr;
 	uint16_t adpcm_write_addr;
 	uint16_t adpcm_length;
+	uint8_t  adpcm_read_buf;
 	uint8_t  adpcm_ctrl;
 	uint8_t  adpcm_dma_ctrl;
 	uint8_t  adpcm_status;
@@ -94,8 +96,14 @@ typedef struct {
 		uint32_t base;          // 24-bit base address
 		uint16_t offset;        // 16-bit offset
 		uint16_t increment;     // 16-bit auto-increment value
-		uint8_t  control;
+		uint8_t  control;       // raw control byte
+		bool     auto_inc;      // bit 0: auto-increment on access
+		bool     add_offset;    // bit 1: add offset to base for address
+		bool     sign_offset;   // bit 3: treat offset as signed (add 0xFF0000)
+		bool     inc_to_base;   // bit 4: add increment to base (else to offset)
+		uint8_t  off_trigger;   // bits 5-6: 0=none 1=low 2=high 3=reg0A
 	} acd_port[4];
+	uint32_t acd_value;         // 32-bit shift/rotate value register
 	uint8_t  acd_shift;
 	uint8_t  acd_rotate;
 
@@ -137,6 +145,10 @@ void cd_term(void);
 // I/O register access (called from pce_readIO / pce_writeIO)
 uint8_t cd_read(uint16_t addr);
 void    cd_write(uint16_t addr, uint8_t val);
+
+// Arcade Card bank $40-$43 memory-mapped access
+uint8_t cd_acd_read_bank(uint8_t port);
+void    cd_acd_write_bank(uint8_t port, uint8_t val);
 
 // Memory map setup (called after RAM is allocated and BIOS is mapped)
 void cd_setup_memory_map(void);

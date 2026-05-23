@@ -206,6 +206,13 @@ cart_write(uint16_t A, uint8_t V)
 
 uint8_t __not_in_flash_func(pce_readIO)(uint16_t A)
 {
+	// Arcade Card bank $40-$43 memory-mapped read
+	if (CD.cd_attached && CD.acd_ram) {
+		uint8_t bank = PCE.MMR[A >> 13];
+		if (bank >= 0x40 && bank <= 0x43)
+			return cd_acd_read_bank(bank & 0x03);
+	}
+
 	uint8_t ret = 0xFF; // Open Bus
 
 	// The last read value in 0800-017FF is read from the io buffer
@@ -330,6 +337,15 @@ uint8_t __not_in_flash_func(pce_readIO)(uint16_t A)
 
 void __not_in_flash_func(pce_writeIO)(uint16_t A, uint8_t V)
 {
+	// Arcade Card bank $40-$43 memory-mapped write
+	if (CD.cd_attached && CD.acd_ram) {
+		uint8_t bank = PCE.MMR[A >> 13];
+		if (bank >= 0x40 && bank <= 0x43) {
+			cd_acd_write_bank(bank & 0x03, V);
+			return;
+		}
+	}
+
 	TRACE_IO("IO Write %02x at %04x\n", V, A);
 
 	// The last write value in 0800-017FF is saved in the io buffer
