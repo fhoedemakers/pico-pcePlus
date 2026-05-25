@@ -23,6 +23,41 @@ static struct {
 
 static uint8_t *framebuffer_top, *framebuffer_bottom;
 
+// Bitmask of which sprites (0..63) intersect each scanline.
+// Built once per frame at the start of rendering; lets draw_sprites()
+// skip sprites that don't touch the current line without iterating all 64.
+static uint64_t sprite_bitmask_per_line[XBUF_HEIGHT];
+
+static void __not_in_flash_func(build_sprite_lists)(void)
+{
+	memset(sprite_bitmask_per_line, 0, sizeof(sprite_bitmask_per_line));
+
+	for (int n = 0; n < 64; n++) {
+		const sprite_t *spr = &PCE.SPRAM[n];
+		uint32_t attr = spr->attr;
+		int y = (spr->y & 0x3FF) - 64;
+		int x = (spr->x & 0x3FF) - 32;
+		int cgx = (attr >> 8) & 1;
+		int cgy = (attr >> 12) & 3;
+		cgy |= cgy >> 1;
+		int height = (cgy + 1) * 16;
+		int width = (cgx + 1) * 16;
+
+		// Sprite entirely off-screen horizontally
+		if (x >= XBUF_WIDTH || x + width <= 0) continue;
+
+		int y_start = (y < 0) ? 0 : y;
+		int y_end = y + height;
+		if (y_end > XBUF_HEIGHT) y_end = XBUF_HEIGHT;
+		if (y_start >= y_end) continue;
+
+		uint64_t bit = (uint64_t)1 << n;
+		for (int line = y_start; line < y_end; line++) {
+			sprite_bitmask_per_line[line] |= bit;
+		}
+	}
+}
+
 /*
 	Draw background tiles between two lines
 */
@@ -36,7 +71,7 @@ static void __not_in_flash_func(draw_tiles)(uint8_t *screen_buffer, int Y1, int 
 	uint32_t bg_w = _bg_w[(IO_VDC_REG[MWR].W >> 4) & 3]; // Bits 5-4 select the width
 	uint32_t bg_h = _bg_h[(IO_VDC_REG[MWR].W >> 6) & 1]; // Bit 6 selects the height
 
-	int num_tiles = IO_VDC_SCREEN_WIDTH / 8 + 1;
+	int num_tiles = MIN(IO_VDC_SCREEN_WIDTH / 8 + 1, XBUF_WIDTH / 8 + 1);
 	int x;
 	int y = Y1 + scroll_y;
 	int offset = y & 7;
@@ -148,44 +183,116 @@ static void __not_in_flash_func(draw_sprite)(uint8_t *P, const uint16_t *C, int 
 
 		if (hflip) {
 			L = L2;
-			if ((J & 0x8000)) P[15] = PAL(1);
-			if ((J & 0x4000)) P[14] = PAL(3);
-			if ((J & 0x2000)) P[13] = PAL(5);
-			if ((J & 0x1000)) P[12] = PAL(7);
-			if ((J & 0x0800)) P[11] = PAL(0);
-			if ((J & 0x0400)) P[10] = PAL(2);
-			if ((J & 0x0200)) P[9]  = PAL(4);
-			if ((J & 0x0100)) P[8]  = PAL(6);
+			// P[12..15] (J bits 15..12)
+			if ((J & 0xF000) == 0xF000) {
+				uint32_t v = (uint32_t)PAL[L >> 28]
+				           | ((uint32_t)PAL[(L >> 20) & 0xF] << 8)
+				           | ((uint32_t)PAL[(L >> 12) & 0xF] << 16)
+				           | ((uint32_t)PAL[(L >> 4) & 0xF] << 24);
+				*(uint32_t *)(P + 12) = v;
+			} else {
+				if ((J & 0x8000)) P[15] = PAL(1);
+				if ((J & 0x4000)) P[14] = PAL(3);
+				if ((J & 0x2000)) P[13] = PAL(5);
+				if ((J & 0x1000)) P[12] = PAL(7);
+			}
+			// P[8..11] (J bits 11..8)
+			if ((J & 0x0F00) == 0x0F00) {
+				uint32_t v = (uint32_t)PAL[(L >> 24) & 0xF]
+				           | ((uint32_t)PAL[(L >> 16) & 0xF] << 8)
+				           | ((uint32_t)PAL[(L >> 8) & 0xF] << 16)
+				           | ((uint32_t)PAL[L & 0xF] << 24);
+				*(uint32_t *)(P + 8) = v;
+			} else {
+				if ((J & 0x0800)) P[11] = PAL(0);
+				if ((J & 0x0400)) P[10] = PAL(2);
+				if ((J & 0x0200)) P[9]  = PAL(4);
+				if ((J & 0x0100)) P[8]  = PAL(6);
+			}
 
 			L = L1;
-			if ((J & 0x80)) P[7] = PAL(1);
-			if ((J & 0x40)) P[6] = PAL(3);
-			if ((J & 0x20)) P[5] = PAL(5);
-			if ((J & 0x10)) P[4] = PAL(7);
-			if ((J & 0x08)) P[3] = PAL(0);
-			if ((J & 0x04)) P[2] = PAL(2);
-			if ((J & 0x02)) P[1] = PAL(4);
-			if ((J & 0x01)) P[0] = PAL(6);
+			// P[4..7] (J bits 7..4)
+			if ((J & 0xF0) == 0xF0) {
+				uint32_t v = (uint32_t)PAL[L >> 28]
+				           | ((uint32_t)PAL[(L >> 20) & 0xF] << 8)
+				           | ((uint32_t)PAL[(L >> 12) & 0xF] << 16)
+				           | ((uint32_t)PAL[(L >> 4) & 0xF] << 24);
+				*(uint32_t *)(P + 4) = v;
+			} else {
+				if ((J & 0x80)) P[7] = PAL(1);
+				if ((J & 0x40)) P[6] = PAL(3);
+				if ((J & 0x20)) P[5] = PAL(5);
+				if ((J & 0x10)) P[4] = PAL(7);
+			}
+			// P[0..3] (J bits 3..0)
+			if ((J & 0x0F) == 0x0F) {
+				uint32_t v = (uint32_t)PAL[(L >> 24) & 0xF]
+				           | ((uint32_t)PAL[(L >> 16) & 0xF] << 8)
+				           | ((uint32_t)PAL[(L >> 8) & 0xF] << 16)
+				           | ((uint32_t)PAL[L & 0xF] << 24);
+				*(uint32_t *)(P + 0) = v;
+			} else {
+				if ((J & 0x08)) P[3] = PAL(0);
+				if ((J & 0x04)) P[2] = PAL(2);
+				if ((J & 0x02)) P[1] = PAL(4);
+				if ((J & 0x01)) P[0] = PAL(6);
+			}
 		} else {
 			L = L2;
-			if ((J & 0x8000)) P[0] = PAL(1);
-			if ((J & 0x4000)) P[1] = PAL(3);
-			if ((J & 0x2000)) P[2] = PAL(5);
-			if ((J & 0x1000)) P[3] = PAL(7);
-			if ((J & 0x0800)) P[4] = PAL(0);
-			if ((J & 0x0400)) P[5] = PAL(2);
-			if ((J & 0x0200)) P[6] = PAL(4);
-			if ((J & 0x0100)) P[7] = PAL(6);
+			// P[0..3] (J bits 15..12)
+			if ((J & 0xF000) == 0xF000) {
+				uint32_t v = (uint32_t)PAL[(L >> 4) & 0xF]
+				           | ((uint32_t)PAL[(L >> 12) & 0xF] << 8)
+				           | ((uint32_t)PAL[(L >> 20) & 0xF] << 16)
+				           | ((uint32_t)PAL[L >> 28] << 24);
+				*(uint32_t *)(P + 0) = v;
+			} else {
+				if ((J & 0x8000)) P[0] = PAL(1);
+				if ((J & 0x4000)) P[1] = PAL(3);
+				if ((J & 0x2000)) P[2] = PAL(5);
+				if ((J & 0x1000)) P[3] = PAL(7);
+			}
+			// P[4..7] (J bits 11..8)
+			if ((J & 0x0F00) == 0x0F00) {
+				uint32_t v = (uint32_t)PAL[L & 0xF]
+				           | ((uint32_t)PAL[(L >> 8) & 0xF] << 8)
+				           | ((uint32_t)PAL[(L >> 16) & 0xF] << 16)
+				           | ((uint32_t)PAL[(L >> 24) & 0xF] << 24);
+				*(uint32_t *)(P + 4) = v;
+			} else {
+				if ((J & 0x0800)) P[4] = PAL(0);
+				if ((J & 0x0400)) P[5] = PAL(2);
+				if ((J & 0x0200)) P[6] = PAL(4);
+				if ((J & 0x0100)) P[7] = PAL(6);
+			}
 
 			L = L1;
-			if ((J & 0x80)) P[8]  = PAL(1);
-			if ((J & 0x40)) P[9]  = PAL(3);
-			if ((J & 0x20)) P[10] = PAL(5);
-			if ((J & 0x10)) P[11] = PAL(7);
-			if ((J & 0x08)) P[12] = PAL(0);
-			if ((J & 0x04)) P[13] = PAL(2);
-			if ((J & 0x02)) P[14] = PAL(4);
-			if ((J & 0x01)) P[15] = PAL(6);
+			// P[8..11] (J bits 7..4)
+			if ((J & 0xF0) == 0xF0) {
+				uint32_t v = (uint32_t)PAL[(L >> 4) & 0xF]
+				           | ((uint32_t)PAL[(L >> 12) & 0xF] << 8)
+				           | ((uint32_t)PAL[(L >> 20) & 0xF] << 16)
+				           | ((uint32_t)PAL[L >> 28] << 24);
+				*(uint32_t *)(P + 8) = v;
+			} else {
+				if ((J & 0x80)) P[8]  = PAL(1);
+				if ((J & 0x40)) P[9]  = PAL(3);
+				if ((J & 0x20)) P[10] = PAL(5);
+				if ((J & 0x10)) P[11] = PAL(7);
+			}
+			// P[12..15] (J bits 3..0)
+			if ((J & 0x0F) == 0x0F) {
+				uint32_t v = (uint32_t)PAL[L & 0xF]
+				           | ((uint32_t)PAL[(L >> 8) & 0xF] << 8)
+				           | ((uint32_t)PAL[(L >> 16) & 0xF] << 16)
+				           | ((uint32_t)PAL[(L >> 24) & 0xF] << 24);
+				*(uint32_t *)(P + 12) = v;
+			} else {
+				if ((J & 0x08)) P[12] = PAL(0);
+				if ((J & 0x04)) P[13] = PAL(2);
+				if ((J & 0x02)) P[14] = PAL(4);
+				if ((J & 0x01)) P[15] = PAL(6);
+			}
 		}
 	}
 }
@@ -202,10 +309,22 @@ static void __not_in_flash_func(draw_sprites)(uint8_t *screen_buffer, int Y1, in
 	// Example: Assume that sprite #2 is priority=0 and sprite #5 is priority=1. If they
 	// overlap then sprite #5 shouldn't be drawn because #2 > #5. But currently it will.
 
+	// Fast pre-filter: union of sprite bitmasks across [Y1, Y2).
+	// Per-scanline rendering hits exactly one entry; multi-line ORs a few.
+	uint64_t bitmask = 0;
+	int y_start = (Y1 < 0) ? 0 : Y1;
+	int y_end = (Y2 > XBUF_HEIGHT) ? XBUF_HEIGHT : Y2;
+	for (int y = y_start; y < y_end; y++) {
+		bitmask |= sprite_bitmask_per_line[y];
+	}
+	if (!bitmask) return;
+
 	// We iterate sprites in reverse order because earlier sprites have
 	// higher priority and therefore must overwrite later sprites.
 
 	for (int n = 63; n >= 0; n--) {
+		if (!((bitmask >> n) & 1)) continue;
+
 		const sprite_t *spr = &PCE.SPRAM[n];
 		uint32_t attr = spr->attr;
 
@@ -227,7 +346,7 @@ static void __not_in_flash_func(draw_sprites)(uint8_t *screen_buffer, int Y1, in
 		TRACE_SPR("Sprite 0x%02X : X = %d, Y = %d, attr = %d, no = %d\n", n, x, y, attr, no);
 
 		// Sprite is completely outside our window, skip it
-		if (y >= Y2 || y + (cgy + 1) * 16 < Y1 || x >= IO_VDC_SCREEN_WIDTH || x + (cgx + 1) * 16 < 0) {
+		if (y >= Y2 || y + (cgy + 1) * 16 < Y1 || x >= XBUF_WIDTH || x + (cgx + 1) * 16 < 0) {
 			continue;
 		}
 
@@ -239,7 +358,25 @@ static void __not_in_flash_func(draw_sprites)(uint8_t *screen_buffer, int Y1, in
 		for (int yy = 0; yy <= cgy; yy += 16) {
 			int height = 16;
 			if (attr & V_FLIP) {
-				height = MIN(16, Y2 - y - (cgy - yy));
+				int segment_top = y + cgy - yy;
+				int t = Y1 - segment_top;
+				if (t < 0) t = 0;
+				if (t >= 16) {
+					height = 0;
+				} else {
+					P += t * XBUF_WIDTH;
+					int avail = MIN(16 - t, Y2 - segment_top - t);
+					int target = MIN(avail, Y2 - Y1);
+					if (target > 0) {
+						// For V_FLIP draw_sprite reads C[height-1] first then decrements.
+						// We need C[height-1] = sprite_data[15-t] (the row visible at Y1).
+						// => C += 16 - t - target
+						C += 16 - t - target;
+						height = target;
+					} else {
+						height = 0;
+					}
+				}
 			} else {
 				int t = Y1 - y - yy;
 				if (t > 0) {
@@ -248,6 +385,7 @@ static void __not_in_flash_func(draw_sprites)(uint8_t *screen_buffer, int Y1, in
 					height -= t;
 				}
 				height = MIN(height, Y2 - y - yy);
+				height = MIN(height, Y2 - Y1);
 			}
 
 			if (height > 0) {
@@ -291,8 +429,7 @@ sprite_hit_check(void)
 }
 
 
-void
-gfx_latch_context(int force)
+void __not_in_flash_func(gfx_latch_context)(int force)
 {
 	if (!gfx_context.latched || force) { // Context is already saved + we haven't render the line using it
 		gfx_context.scroll_x = IO_VDC_REG[BXR].W;
@@ -321,8 +458,10 @@ render_lines(int min_line, int max_line)
 	framebuffer_bottom = screen_buffer + PCE.VDC.screen_height * XBUF_WIDTH;
 
 	// We must fill the region with color 0 first.
-	size_t screen_width = IO_VDC_SCREEN_WIDTH;
-	for (int y = min_line; y <= max_line; y++) {
+	// Clamp to XBUF_WIDTH: wide modes (up to 512px) would overflow the single-line buffer.
+	// We only display 320px, so rendering up to XBUF_WIDTH (368) covers everything visible.
+	size_t screen_width = MIN(IO_VDC_SCREEN_WIDTH, XBUF_WIDTH);
+	for (int y = min_line; y < max_line; y++) {
 		memset(screen_buffer + (y * XBUF_WIDTH), PCE.Palette[0], screen_width);
 	}
 
@@ -340,6 +479,8 @@ render_lines(int min_line, int max_line)
 	if (gfx_context.control & 0x40) {
 		draw_sprites(screen_buffer, min_line, max_line, 1);
 	}
+
+	osd_gfx_lines_rendered(min_line, max_line);
 }
 
 
@@ -371,8 +512,7 @@ gfx_term(void)
 	More than one interrupt can happen in a single line on real hardware and the cpu
 	would usually receive them one by one. We use an uint32 as a 8 slot buffer.
 */
-void
-gfx_irq(int type)
+void __not_in_flash_func(gfx_irq)(int type)
 {
 	/* If IRQ, push it on the stack */
 	if (type >= 0) {
@@ -424,22 +564,31 @@ void __not_in_flash_func(gfx_run)(void)
 	if (scanline >= 14 && scanline <= 255) {
 		if (scanline == IO_VDC_MINLINE) {
 			gfx_latch_context(1);
+			build_sprite_lists();
 		}
 
 		if (scanline >= IO_VDC_MINLINE && scanline <= IO_VDC_MAXLINE) {
 			if (gfx_context.latched) {
-				render_lines(last_line_counter, line_counter);
+				if (last_line_counter < line_counter) {
+					osd_gfx_render_line = last_line_counter;
+					render_lines(last_line_counter, line_counter);
+				}
 				last_line_counter = line_counter;
 			}
+			gfx_latch_context(1);
+			osd_gfx_render_line = line_counter;
+			render_lines(line_counter, line_counter + 1);
 			line_counter++;
+			last_line_counter = line_counter;
 		}
 	}
 	/* V Blank trigger line */
 	else if (scanline == 256) {
-
-		// Draw any lines left in the context
-		gfx_latch_context(0);
-		render_lines(last_line_counter, line_counter);
+		if (last_line_counter < line_counter) {
+			gfx_latch_context(0);
+			osd_gfx_render_line = last_line_counter;
+			render_lines(last_line_counter, line_counter);
+		}
 
 		// Trigger interrupts
 		if (SpHitON && sprite_hit_check()) {

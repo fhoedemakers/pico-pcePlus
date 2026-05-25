@@ -55,17 +55,20 @@ static char fpsString[3] = "00";
 #define EMULATOR_CLOCKFREQ_KHZ 252000
 static uint32_t CPUFreqKHz = EMULATOR_CLOCKFREQ_KHZ;
 
-// PCE indexed framebuffer: pce-go renders 8-bit palette indices here.
-// Renderer writes up to 16 bytes of scratch *before* and *after* the active
-// region (see render_lines() in pce-go/gfx.c: framebuffer_top = screen_buffer
-// - 16, plus sub-byte scroll_x shifts in draw_tiles). Pad with 16 bytes on
-// each side and expose the offset pointer to keep those scratch writes from
-// clobbering neighbouring BSS variables.
-static uint8_t pce_framebuffer_storage[XBUF_WIDTH * XBUF_HEIGHT + 32];
-static uint8_t *const pce_framebuffer = pce_framebuffer_storage + 16;
+// Per-scanline indexed line buffer: pce-go renders one scanline at a time.
+// 16-byte scratch padding on each side (see render_lines() in gfx.c).
+static uint8_t pce_line_buffer_storage[XBUF_WIDTH + 64];
+static uint8_t *const pce_line_buffer = pce_line_buffer_storage + 16;
+int osd_gfx_render_line = 0;
 
 // Lookup table: 8-bit palette index -> RGB555 (HSTX) or RGB444 (DVI)
 static uint16_t paletteLUT[256];
+
+// Screen geometry — updated by osd_gfx_framebuffer() each time render_lines fires
+static int current_screen_w = 256;
+static int current_screen_h = 240;
+static int current_x_offset = 32;
+static int current_y_offset = 0;
 
 // Settings visibility for PCE
 const int8_t g_settings_visibility_pce[MOPT_COUNT] = {
@@ -141,49 +144,83 @@ static void buildPaletteLUT()
 
 static int16_t pce_audio_buffer[PCE_SAMPLES_PER_FRAME * 2]; // stereo interleaved
 
-static inline void convertScanline(uint16_t *dst, int y, int y_offset, int screen_h,
-                                   int x_offset, int screen_w)
-{
-    if (y >= y_offset && y < y_offset + screen_h)
-    {
-        uint8_t *src = &pce_framebuffer[(y - y_offset) * XBUF_WIDTH];
-        if (x_offset > 0)
-            memset(dst, 0, x_offset * sizeof(uint16_t));
-        for (int x = 0; x < screen_w; x++)
-            dst[x + x_offset] = paletteLUT[src[x]];
-        if (x_offset + screen_w < 320)
-            memset(dst + x_offset + screen_w, 0, (320 - x_offset - screen_w) * sizeof(uint16_t));
-    }
-    else
-    {
-        memset(dst, 0, 320 * sizeof(uint16_t));
-    }
-}
-
 #define AUDIO_SAMPLES_PER_SCANLINE 4
 
-static void __not_in_flash_func(convertAndDisplayFrame)()
+extern "C" void __not_in_flash_func(osd_gfx_lines_rendered)(int first_line, int last_line)
 {
-    int screen_w = PCE.VDC.screen_width;
-    int screen_h = PCE.VDC.screen_height;
+    (void)last_line;
+    int display_y = first_line + current_y_offset;
+    if (display_y < 0 || display_y >= 240) return;
 
-    if (screen_w > 320) screen_w = 320;
-    if (screen_h > 240) screen_h = 240;
-
-    int x_offset = (320 - screen_w) / 2;
-    int y_offset = (240 - screen_h) / 2;
-    int audio_idx = 0;
-
+    uint16_t *dst;
 #if HSTX
-    // The HSTX 8:7 stretch reads a centred 252-px window and is geometrically
-    // tuned for NES/PCE 256-px modes. For 320-px (or wider) PCE modes, that
-    // window crops content. Auto-fall-back to 1:1 when not in a 256-px mode.
-    static int last_screen_w = -1;
-    if (screen_w != last_screen_w) {
-        hstx_setAspectRatio87((scaleMode8_7_ && screen_w <= 256) ? 1 : 0);
-        last_screen_w = screen_w;
-    }
+    dst = hstx_getlineFromFramebuffer(display_y);
+#elif FRAMEBUFFERISPOSSIBLE
+    auto *b = Frens::isFrameBufferUsed() ? nullptr : dvi_->getLineBuffer();
+    dst = b ? b->data() : &Frens::framebuffer[display_y * 320];
+#else
+    auto *b = dvi_->getLineBuffer();
+    dst = b->data();
 #endif
+
+    if (current_x_offset > 0)
+        memset(dst, 0, current_x_offset * sizeof(uint16_t));
+
+    // 4 indexed pixels per iteration: one uint32_t load, four LUT lookups,
+    // two uint32_t stores. pce_line_buffer and dst+offset are both 4-byte
+    // aligned (PCE widths are multiples of 8, so x_offset is a multiple of 4).
+    const uint32_t *src32 = (const uint32_t *)pce_line_buffer;
+    uint32_t *dst32 = (uint32_t *)(dst + current_x_offset);
+    int chunks = current_screen_w >> 2;
+    for (int i = 0; i < chunks; i++)
+    {
+        uint32_t s = src32[i];
+        uint32_t p0 = paletteLUT[s & 0xFF];
+        uint32_t p1 = paletteLUT[(s >> 8) & 0xFF];
+        uint32_t p2 = paletteLUT[(s >> 16) & 0xFF];
+        uint32_t p3 = paletteLUT[(s >> 24)];
+        dst32[i * 2]     = p0 | (p1 << 16);
+        dst32[i * 2 + 1] = p2 | (p3 << 16);
+    }
+    // Defensive: handle a non-multiple-of-4 width (shouldn't happen on PCE).
+    for (int x = chunks << 2; x < current_screen_w; x++)
+        dst[x + current_x_offset] = paletteLUT[pce_line_buffer[x]];
+
+    int right = current_x_offset + current_screen_w;
+    if (right < 320)
+        memset(dst + right, 0, (320 - right) * sizeof(uint16_t));
+
+    if (settings.flags.displayFrameRate && display_y >= FPSSTART && display_y < FPSEND)
+    {
+        WORD *fpsBuffer = dst + 4;
+        int rowInChar = display_y % 8;
+        for (int i = 0; i < 2; i++)
+        {
+            char fontSlice = getcharslicefrom8x8font(fpsString[i], rowInChar);
+            for (int bit = 0; bit < 8; bit++)
+            {
+                if (fontSlice & 1)
+                    *fpsBuffer++ = fpsfgcolor;
+                else
+                    *fpsBuffer++ = fpsbgcolor;
+                fontSlice >>= 1;
+            }
+        }
+    }
+
+#if !HSTX
+#if FRAMEBUFFERISPOSSIBLE
+    if (b) dvi_->setLineBuffer(display_y, b);
+#else
+    dvi_->setLineBuffer(display_y, b);
+#endif
+#endif
+}
+
+// Per-frame: push audio, clear display borders, render FPS overlay.
+static void __not_in_flash_func(pushAudioAndOverlay)()
+{
+    int audio_idx = 0;
 
 #if HSTX
 #if EXT_AUDIO_IS_ENABLED
@@ -191,7 +228,6 @@ static void __not_in_flash_func(convertAndDisplayFrame)()
 #endif
     for (int y = 0; y < 240; y++)
     {
-        convertScanline(hstx_getlineFromFramebuffer(y), y, y_offset, screen_h, x_offset, screen_w);
         for (int a = 0; a < AUDIO_SAMPLES_PER_SCANLINE && audio_idx < PCE_SAMPLES_PER_FRAME; a++, audio_idx++)
         {
             int16_t l = pce_audio_buffer[audio_idx * 2];
@@ -208,113 +244,71 @@ static void __not_in_flash_func(convertAndDisplayFrame)()
                 hstx_push_audio_sample(l, r);
         }
     }
+    // Clear top/bottom border lines in HSTX framebuffer
+    for (int y = 0; y < current_y_offset; y++)
+        memset(hstx_getlineFromFramebuffer(y), 0, 320 * sizeof(uint16_t));
+    for (int y = current_y_offset + current_screen_h; y < 240; y++)
+        memset(hstx_getlineFromFramebuffer(y), 0, 320 * sizeof(uint16_t));
+
 #elif !HSTX
+    // DVI audio (framebuffer and line-streaming paths)
+#if EXT_AUDIO_IS_ENABLED
+    if (settings.flags.useExtAudio == 1 || Frens::isHeadPhoneJackConnected())
+    {
+        for (int a = 0; a < PCE_SAMPLES_PER_FRAME; a++)
+            EXT_AUDIO_ENQUEUE_SAMPLE(pce_audio_buffer[a * 2], pce_audio_buffer[a * 2 + 1]);
+    }
+    else
+#endif
+    {
+        auto &ring = dvi_->getAudioRingBuffer();
+        int avail = std::min<int>(PCE_SAMPLES_PER_FRAME, ring.getWritableSize());
+        if (avail > 0)
+        {
+            auto p = ring.getWritePointer();
+            for (int a = 0; a < avail; a++)
+                *p++ = {static_cast<short>(pce_audio_buffer[a * 2]),
+                        static_cast<short>(pce_audio_buffer[a * 2 + 1])};
+            ring.advanceWritePointer(avail);
+        }
+    }
 #if FRAMEBUFFERISPOSSIBLE
     if (Frens::isFrameBufferUsed())
     {
-        for (int y = 0; y < 240; y++)
-        {
-            convertScanline(&Frens::framebuffer[y * 320], y, y_offset, screen_h, x_offset, screen_w);
-#if EXT_AUDIO_IS_ENABLED
-            if (settings.flags.useExtAudio == 1 || Frens::isHeadPhoneJackConnected())
-            {
-                for (int a = 0; a < AUDIO_SAMPLES_PER_SCANLINE && audio_idx < PCE_SAMPLES_PER_FRAME; a++, audio_idx++)
-                    EXT_AUDIO_ENQUEUE_SAMPLE(pce_audio_buffer[audio_idx * 2], pce_audio_buffer[audio_idx * 2 + 1]);
-            }
-            else
-#endif
-            {
-                auto &ring = dvi_->getAudioRingBuffer();
-                int avail = std::min<int>(AUDIO_SAMPLES_PER_SCANLINE, PCE_SAMPLES_PER_FRAME - audio_idx);
-                avail = std::min<int>(avail, ring.getWritableSize());
-                if (avail > 0)
-                {
-                    auto p = ring.getWritePointer();
-                    for (int a = 0; a < avail; a++, audio_idx++)
-                        *p++ = {static_cast<short>(pce_audio_buffer[audio_idx * 2]),
-                                static_cast<short>(pce_audio_buffer[audio_idx * 2 + 1])};
-                    ring.advanceWritePointer(avail);
-                }
-            }
-        }
-    }
-    else
-    {
-#endif
-        for (int y = 0; y < 240; y++)
-        {
-            auto *b = dvi_->getLineBuffer();
-            uint16_t *dst = b->data();
-            convertScanline(dst, y, y_offset, screen_h, x_offset, screen_w);
-            dvi_->setLineBuffer(y, b);
-#if EXT_AUDIO_IS_ENABLED
-            if (settings.flags.useExtAudio == 1 || Frens::isHeadPhoneJackConnected())
-            {
-                for (int a = 0; a < AUDIO_SAMPLES_PER_SCANLINE && audio_idx < PCE_SAMPLES_PER_FRAME; a++, audio_idx++)
-                    EXT_AUDIO_ENQUEUE_SAMPLE(pce_audio_buffer[audio_idx * 2], pce_audio_buffer[audio_idx * 2 + 1]);
-            }
-            else
-#endif
-            {
-                auto &ring = dvi_->getAudioRingBuffer();
-                int avail = std::min<int>(AUDIO_SAMPLES_PER_SCANLINE, PCE_SAMPLES_PER_FRAME - audio_idx);
-                avail = std::min<int>(avail, ring.getWritableSize());
-                if (avail > 0)
-                {
-                    auto p = ring.getWritePointer();
-                    for (int a = 0; a < avail; a++, audio_idx++)
-                        *p++ = {static_cast<short>(pce_audio_buffer[audio_idx * 2]),
-                                static_cast<short>(pce_audio_buffer[audio_idx * 2 + 1])};
-                    ring.advanceWritePointer(avail);
-                }
-            }
-        }
-#if FRAMEBUFFERISPOSSIBLE
+        // Clear top/bottom border lines in DVI framebuffer
+        for (int y = 0; y < current_y_offset; y++)
+            memset(&Frens::framebuffer[y * 320], 0, 320 * sizeof(uint16_t));
+        for (int y = current_y_offset + current_screen_h; y < 240; y++)
+            memset(&Frens::framebuffer[y * 320], 0, 320 * sizeof(uint16_t));
     }
 #endif
 #endif
 
-    // Display frame rate overlay
-    if (settings.flags.displayFrameRate)
-    {
-        for (int line = FPSSTART; line < FPSEND; line++)
-        {
-            WORD *fpsBuffer = nullptr;
-#if HSTX
-            fpsBuffer = hstx_getlineFromFramebuffer(line) + 4;
-#elif FRAMEBUFFERISPOSSIBLE
-            if (Frens::isFrameBufferUsed())
-                fpsBuffer = &Frens::framebuffer[line * 320] + 4;
-#endif
-            if (fpsBuffer)
-            {
-                int rowInChar = line % 8;
-                for (int i = 0; i < 2; i++)
-                {
-                    char fontSlice = getcharslicefrom8x8font(fpsString[i], rowInChar);
-                    for (int bit = 0; bit < 8; bit++)
-                    {
-                        if (fontSlice & 1)
-                            *fpsBuffer++ = fpsfgcolor;
-                        else
-                            *fpsBuffer++ = fpsbgcolor;
-                        fontSlice >>= 1;
-                    }
-                }
-            }
-        }
-    }
+    // FPS overlay is rendered inline in osd_gfx_lines_rendered()
 }
 
 // OSD callbacks required by pce-go
-extern "C" uint8_t *osd_gfx_framebuffer(int width, int height)
+extern "C" uint8_t *__not_in_flash_func(osd_gfx_framebuffer)(int width, int height)
 {
-    return pce_framebuffer;
+    current_screen_w = (width > 320) ? 320 : width;
+    current_screen_h = (height > 240) ? 240 : height;
+    current_x_offset = (320 - current_screen_w) / 2;
+    current_y_offset = (240 - current_screen_h) / 2;
+
+#if HSTX
+    static int last_w = -1;
+    if (current_screen_w != last_w)
+    {
+        hstx_setAspectRatio87((scaleMode8_7_ && current_screen_w <= 256) ? 1 : 0);
+        last_w = current_screen_w;
+    }
+#endif
+
+    return pce_line_buffer - osd_gfx_render_line * XBUF_WIDTH;
 }
 
 extern "C" void osd_vsync(void)
 {
-    // Conversion is done explicitly in the main loop via convertAndDisplayFrame()
 }
 
 extern "C" void osd_input_read(uint8_t joypads[8])
@@ -623,7 +617,7 @@ void __not_in_flash_func(process)(void)
         readInputAndMapToPCE(&pdwPad1, &pdwPad2, &pdwSystem, false, nullptr);
         pce_run();
         psg_update(pce_audio_buffer, PCE_SAMPLES_PER_FRAME, 0x3F);
-        convertAndDisplayFrame();
+        pushAudioAndOverlay();
         ProcessAfterFrameIsRendered();
     }
 }
