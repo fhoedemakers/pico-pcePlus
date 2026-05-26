@@ -352,52 +352,40 @@ static void __not_in_flash_func(draw_sprites)(uint8_t *screen_buffer, int Y1, in
 
 		cgy *= 16;
 
-		uint8_t *P = screen_buffer + ((attr & V_FLIP ? cgy + y : y) * XBUF_WIDTH) + x;
-		uint16_t *C = PCE.VRAM + (no * 64);
+		// Sprite-cell base. Vertical cells are 128 uint16_t apart
+		// ((yy/16) * 128). Horizontal cells are 64 apart (j * 64).
+		uint16_t *C_base = PCE.VRAM + (no * 64);
 
 		for (int yy = 0; yy <= cgy; yy += 16) {
-			int height = 16;
-			if (attr & V_FLIP) {
-				int segment_top = y + cgy - yy;
-				int t = Y1 - segment_top;
-				if (t < 0) t = 0;
-				if (t >= 16) {
-					height = 0;
-				} else {
-					P += t * XBUF_WIDTH;
-					int avail = MIN(16 - t, Y2 - segment_top - t);
-					int target = MIN(avail, Y2 - Y1);
-					if (target > 0) {
-						// For V_FLIP draw_sprite reads C[height-1] first then decrements.
-						// We need C[height-1] = sprite_data[15-t] (the row visible at Y1).
-						// => C += 16 - t - target
-						C += 16 - t - target;
-						height = target;
-					} else {
-						height = 0;
-					}
-				}
-			} else {
-				int t = Y1 - y - yy;
-				if (t > 0) {
-					P += t * XBUF_WIDTH;
-					C += t;
-					height -= t;
-				}
-				height = MIN(height, Y2 - y - yy);
-				height = MIN(height, Y2 - Y1);
-			}
+			// Screen row of this segment's top (before top-clip).
+			int segment_top = (attr & V_FLIP) ? (y + cgy - yy) : (y + yy);
+			int t = Y1 - segment_top;
+			if (t < 0) t = 0;
+			if (t >= 16) continue;   // segment entirely above Y1
 
-			if (height > 0) {
-				for (int j = 0; j <= cgx; j++) {
-					draw_sprite(P + (attr & H_FLIP ? cgx - j : j) * 16, C + j * 64, height, attr);
-				}
-			} else {
-				MESSAGE_DEBUG("negative sprite height!\n");
-			}
+			int avail = MIN(16 - t, Y2 - segment_top - t);
+			int target = MIN(avail, Y2 - Y1);
+			if (target <= 0) continue; // segment entirely below Y2
 
-			P += ((attr & V_FLIP) ? -height : height) * XBUF_WIDTH;
-			C += height + 16 * 7;
+			int height = target;
+
+			// Recompute P from segment_top each iteration: with per-scanline
+			// rendering screen_buffer is a virtual offset, so we cannot rely
+			// on P-advancement deltas between iterations — a skipped segment
+			// must not leave P pointing into unrelated BSS.
+			uint8_t *P = screen_buffer + (segment_top + t) * XBUF_WIDTH + x;
+
+			// Pick the row offset within this cell-pair that draw_sprite needs.
+			// Non-V_FLIP reads C[0..height-1] forward, so start at row t.
+			// V_FLIP reads C[height-1..0] in reverse, so C[height-1] must be
+			// sprite row (15-t) -> start at row (16-t-height).
+			uint16_t *C = C_base + (yy / 16) * 128
+			             + ((attr & V_FLIP) ? (16 - t - height) : t);
+
+			for (int j = 0; j <= cgx; j++) {
+				draw_sprite(P + (attr & H_FLIP ? cgx - j : j) * 16,
+				            C + j * 64, height, attr);
+			}
 		}
 	}
 }
