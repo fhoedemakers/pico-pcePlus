@@ -806,7 +806,6 @@ int main()
             }
             printf("Starting game\n");
             Frens::PaceFrames60fps(true);
-             scaleMode8_7_ = Frens::applyScreenMode(settings.screenMode);
             process();
             if (isCDGame) {
                 // Close BIN handle (still-open until cd_term runs). The BIOS
