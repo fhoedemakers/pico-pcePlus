@@ -272,14 +272,14 @@ static void unload_disc_state(void)
 int
 LoadDisc(const char *cue_path)
 {
-	if (!cue_path) return -1;
+	if (!cue_path) return -2;
 
 	// Start from a clean slate — if the previous game was also a CD this
 	// frees the prior BIOS/CD allocations.
 	unload_disc_state();
 	if (cd_init() != 0) {
 		MESSAGE_ERROR("cd_init failed\n");
-		return -1;
+		return -2;
 	}
 
 	// --- 1. Find BIOS ---
@@ -296,26 +296,26 @@ LoadDisc(const char *cue_path)
 	// --- 2. Load BIOS into PSRAM ---
 	if (f_open(&fil, bios_path, FA_READ) != FR_OK) {
 		MESSAGE_ERROR("Cannot open BIOS %s\n", bios_path);
-		return -1;
+		return -2;
 	}
 	FSIZE_t bios_size = f_size(&fil);
 	if (bios_size < 0x2000 || bios_size > 0x100000) {
 		MESSAGE_ERROR("BIOS size unreasonable: %lu\n", (unsigned long)bios_size);
 		f_close(&fil);
-		return -1;
+		return -2;
 	}
 	PCE.ROM = (uint8_t *)frens_f_malloc(bios_size);
 	if (!PCE.ROM) {
 		MESSAGE_ERROR("Cannot allocate %lu bytes for BIOS\n", (unsigned long)bios_size);
 		f_close(&fil);
-		return -1;
+		return -2;
 	}
 	UINT br = 0;
 	if (f_read(&fil, PCE.ROM, bios_size, &br) != FR_OK || br != bios_size) {
 		MESSAGE_ERROR("BIOS read failed (got %u of %lu)\n", br, (unsigned long)bios_size);
 		f_close(&fil);
 		unload_disc_state();
-		return -1;
+		return -2;
 	}
 	f_close(&fil);
 
@@ -340,7 +340,7 @@ LoadDisc(const char *cue_path)
 	if (!CD.cd_ram || !CD.scd_ram || !CD.adpcm_ram || !CD.acd_ram || !CD.bram) {
 		MESSAGE_ERROR("CD/Arcade Card RAM allocation failed\n");
 		unload_disc_state();
-		return -1;
+		return -2;
 	}
 	memset(CD.cd_ram,    0,    CD_RAM_SIZE);
 	memset(CD.scd_ram,   0,    SCD_RAM_SIZE);
@@ -352,7 +352,7 @@ LoadDisc(const char *cue_path)
 	if (cd_load_cue(cue_path) != 0) {
 		MESSAGE_ERROR("cd_load_cue failed for %s\n", cue_path);
 		unload_disc_state();
-		return -1;
+		return -2;
 	}
 
 	// --- 5. Wire memory map and reset ---

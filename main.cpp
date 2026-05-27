@@ -143,8 +143,27 @@ static void buildPaletteLUT()
 }
 
 static int16_t pce_audio_buffer[PCE_SAMPLES_PER_FRAME * 2]; // stereo interleaved
+static int audio_pos = 0;
+static int audio_accum = 0;
+static int audio_scanline_count = 0;
 
 #define AUDIO_SAMPLES_PER_SCANLINE 4
+#define PSG_BATCH_SCANLINES 44
+
+extern "C" void __not_in_flash_func(osd_psg_scanline)(void)
+{
+    audio_accum += PCE_AUDIO_RATE;
+    audio_scanline_count++;
+    if (audio_scanline_count < PSG_BATCH_SCANLINES && PCE.Scanline < 262)
+        return;
+    audio_scanline_count = 0;
+    int n = audio_accum / (60 * 263);
+    audio_accum -= n * (60 * 263);
+    if (n > 0 && audio_pos + n <= PCE_SAMPLES_PER_FRAME) {
+        psg_update(pce_audio_buffer + audio_pos * 2, n, 0x3F);
+        audio_pos += n;
+    }
+}
 
 extern "C" void __not_in_flash_func(osd_gfx_lines_rendered)(int first_line, int last_line)
 {
@@ -615,8 +634,10 @@ void __not_in_flash_func(process)(void)
     while (reset == false)
     {
         readInputAndMapToPCE(&pdwPad1, &pdwPad2, &pdwSystem, false, nullptr);
+        audio_pos = 0;
+        audio_accum = 0;
+        audio_scanline_count = 0;
         pce_run();
-        psg_update(pce_audio_buffer, PCE_SAMPLES_PER_FRAME, 0x3F);
         pushAudioAndOverlay();
         ProcessAfterFrameIsRendered();
     }
@@ -790,7 +811,9 @@ int main()
             int loadResult;
             if (isCDGame) {
                 loadResult = LoadDisc(selectedRom);
-                if (loadResult != 0) {
+                if (loadResult == -1) {
+                    snprintf(ErrorMessage, ERRORMESSAGESIZE, "No BIOS in /bios/");
+                } else if (loadResult != 0) {
                     snprintf(ErrorMessage, ERRORMESSAGESIZE, "CD load failed");
                 }
             } else {
@@ -804,12 +827,37 @@ int main()
                 printf("%s\n", ErrorMessage);
                 break;
             }
+
+            if (isCDGame) {
+                char bramPath[50];
+                snprintf(bramPath, sizeof(bramPath),
+                         SAVESTATEDIR "/%s/%08X/bram.sav",
+                         FrensSettings::getEmulatorTypeString(),
+                         Frens::getCrcOfLoadedRom());
+                cd_bram_load(bramPath);
+            }
+
             printf("Starting game\n");
             Frens::PaceFrames60fps(true);
             process();
             if (isCDGame) {
-                // Close BIN handle (still-open until cd_term runs). The BIOS
-                // PSRAM allocation is owned by cd_term() and released there.
+                char bramPath[50];
+                snprintf(bramPath, sizeof(bramPath), SAVESTATEDIR);
+                f_mkdir(bramPath);
+                snprintf(bramPath, sizeof(bramPath),
+                         SAVESTATEDIR "/%s",
+                         FrensSettings::getEmulatorTypeString());
+                f_mkdir(bramPath);
+                snprintf(bramPath, sizeof(bramPath),
+                         SAVESTATEDIR "/%s/%08X",
+                         FrensSettings::getEmulatorTypeString(),
+                         Frens::getCrcOfLoadedRom());
+                f_mkdir(bramPath);
+                snprintf(bramPath, sizeof(bramPath),
+                         SAVESTATEDIR "/%s/%08X/bram.sav",
+                         FrensSettings::getEmulatorTypeString(),
+                         Frens::getCrcOfLoadedRom());
+                cd_bram_save(bramPath);
                 cd_close();
             } else {
                 PCE.ROM = NULL; // prevent ShutdownPCE from freeing flash/PSRAM

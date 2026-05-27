@@ -106,3 +106,4 @@ extern uint8_t *osd_gfx_framebuffer(int width, int height);
 extern void osd_gfx_lines_rendered(int first_line, int last_line);
 extern void osd_input_read(uint8_t joypads[8]);
 extern void osd_vsync(void);
+extern void osd_psg_scanline(void);

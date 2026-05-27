@@ -151,6 +151,7 @@ void __not_in_flash_func(pce_run)(void)
 			PCE.Cycles = 0;
 		}
 		gfx_run();
+		osd_psg_scanline();
 	}
 }
 

@@ -33,8 +33,8 @@ static void __not_in_flash_func(psg_update_chan)(sample_t *buf, int ch, size_t d
 	/*
 	* This gives us a volume level of (0...15).
 	*/
-	int lvol = (((chan->balance >> 4) * 1.1) * (chan->control & 0x1F)) / 32;
-	int rvol = (((chan->balance & 0xF) * 1.1) * (chan->control & 0x1F)) / 32;
+	int lvol = ((chan->balance >> 4) * 9 * (chan->control & 0x1F)) / 256;
+	int rvol = ((chan->balance & 0xF) * 9 * (chan->control & 0x1F)) / 256;
 
 	if (!stereo) {
 		lvol = (lvol + rvol) / 2;
@@ -202,7 +202,7 @@ void __not_in_flash_func(psg_update)(int16_t *output, size_t length, uint32_t ch
 
 	memset(output, 0, length * sizeof(int16_t));
 
-	static sample_t mix_buffer[((44100 / 60) * 2) + 2];
+	static sample_t mix_buffer[256];
 
 	for (int i = 0; i < PSG_CHANNELS; i++)
 	{
