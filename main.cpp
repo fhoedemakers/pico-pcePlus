@@ -211,7 +211,7 @@ extern "C" void __not_in_flash_func(osd_gfx_lines_rendered)(int first_line, int 
 
     if (settings.flags.displayFrameRate && display_y >= FPSSTART && display_y < FPSEND)
     {
-        WORD *fpsBuffer = dst + 4;
+        WORD *fpsBuffer = dst + current_x_offset + 4;
         int rowInChar = display_y % 8;
         for (int i = 0; i < 2; i++)
         {
