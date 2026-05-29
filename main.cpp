@@ -236,9 +236,20 @@ extern "C" void __not_in_flash_func(osd_gfx_lines_rendered)(int first_line, int 
 #endif
 }
 
+static int16_t cd_audio_buffer[PCE_SAMPLES_PER_FRAME * 2];
+
 // Per-frame: push audio, clear display borders, render FPS overlay.
 static void __not_in_flash_func(pushAudioAndOverlay)()
 {
+    if (CD.cd_attached && CD.audio_status == 0) {
+        cd_audio_update();
+        int n = cd_audio_generate_samples(cd_audio_buffer, PCE_SAMPLES_PER_FRAME);
+        for (int i = 0; i < n * 2; i++) {
+            int32_t v = (int32_t)pce_audio_buffer[i] + (int32_t)cd_audio_buffer[i];
+            pce_audio_buffer[i] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+        }
+    }
+
     int audio_idx = 0;
 
 #if HSTX

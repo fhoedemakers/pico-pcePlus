@@ -22,6 +22,10 @@
 static FIL *bin_fil = NULL;
 static char current_bin_name[CD_BIN_NAME_MAX];
 
+// Separate file handle for CD audio streaming (independent of data reads).
+static FIL *audio_fil = NULL;
+static char audio_bin_name[CD_BIN_NAME_MAX];
+
 // C-side allocator wrappers from pico_shared/FrensHelpers.cpp. They route to
 // PSRAM via lwmem when available and fall back to plain malloc otherwise.
 extern void *frens_f_malloc(size_t size);
@@ -114,6 +118,7 @@ int
 cd_init(void)
 {
 	memset(&CD, 0, sizeof(CD));
+	CD.audio_status = 1; // Inactive
 	return 0;
 }
 
@@ -130,7 +135,15 @@ cd_reset(void)
 	CD.data_length = 0;
 	CD.read_remaining = 0;
 	CD.bram_locked = true;
-	CD.audio_status = 0;
+	CD.audio_status = 1;   // Inactive
+	CD.audio_start_lba = 0;
+	CD.audio_end_lba = 0;
+	CD.audio_cur_lba = 0;
+	CD.audio_cur_sample = 0;
+	CD.audio_end_mode = 0;
+	CD.audio_ring_write = 0;
+	CD.audio_ring_read = 0;
+	CD.audio_ring_count = 0;
 	CD.irq_status = 0;
 	CD.sense_key = 0;
 	CD.sense_asc = 0;
@@ -170,11 +183,12 @@ cd_term(void)
 
 	cd_close();
 
-	if (CD.cd_ram)    { frens_f_free(CD.cd_ram);    CD.cd_ram = NULL; }
-	if (CD.scd_ram)   { frens_f_free(CD.scd_ram);   CD.scd_ram = NULL; }
-	if (CD.adpcm_ram) { frens_f_free(CD.adpcm_ram); CD.adpcm_ram = NULL; }
-	if (CD.acd_ram)   { frens_f_free(CD.acd_ram);   CD.acd_ram = NULL; }
-	if (CD.bram)      { frens_f_free(CD.bram);      CD.bram = NULL; }
+	if (CD.cd_ram)         { frens_f_free(CD.cd_ram);         CD.cd_ram = NULL; }
+	if (CD.scd_ram)        { frens_f_free(CD.scd_ram);        CD.scd_ram = NULL; }
+	if (CD.adpcm_ram)      { frens_f_free(CD.adpcm_ram);      CD.adpcm_ram = NULL; }
+	if (CD.acd_ram)        { frens_f_free(CD.acd_ram);        CD.acd_ram = NULL; }
+	if (CD.bram)           { frens_f_free(CD.bram);           CD.bram = NULL; }
+	if (CD.audio_ring_buf) { frens_f_free(CD.audio_ring_buf); CD.audio_ring_buf = NULL; }
 
 	// LoadDisc() allocated PCE.ROM via frens_f_malloc (PSRAM), so we own
 	// that buffer when a CD was attached. Releasing it here — and clearing
@@ -556,6 +570,12 @@ cd_close(void)
 		bin_fil = NULL;
 	}
 	current_bin_name[0] = '\0';
+	if (audio_fil) {
+		f_close(audio_fil);
+		frens_f_free(audio_fil);
+		audio_fil = NULL;
+	}
+	audio_bin_name[0] = '\0';
 	memset(CD.tracks, 0, sizeof(CD.tracks));
 	CD.num_tracks = 0;
 	CD.first_track = 0;
@@ -650,6 +670,8 @@ static int read_sector(uint32_t lba)
 static void cdc_enter_phase(cdc_phase_t phase);
 static void cdc_set_good_status(void);
 static void cdc_update_irqs(void);
+static uint32_t parse_audio_lba(const uint8_t *cmd);
+static void cd_audio_flush_ring(void);
 
 static void cdc_data_in(const uint8_t *data, uint32_t len)
 {
@@ -674,7 +696,6 @@ static void cdc_set_error(uint8_t key, uint8_t asc, uint8_t ascq)
 static void cdc_process_command(void)
 {
 	uint8_t cmd = CD.scsi_command[0];
-
 	switch (cmd) {
 	case 0x00: // TEST UNIT READY
 		if (CD.num_tracks > 0) {
@@ -719,9 +740,58 @@ static void cdc_process_command(void)
 		break;
 	}
 
-	case 0xD8: // SAPSP (play audio start — stub)
-	case 0xD9: // SAPEP (play audio end  — stub)
-	case 0xDA: // PAUSE                  — stub
+	case 0xD8: { // SAPSP — Set Audio Playback Start Position
+		uint32_t lba = parse_audio_lba(CD.scsi_command);
+		if (lba >= CD.total_lba) {
+			cdc_set_good_status();
+			break;
+		}
+		CD.audio_start_lba = lba;
+		CD.audio_cur_lba   = lba;
+		CD.audio_cur_sample = 0;
+		cd_audio_flush_ring();
+		if (CD.scsi_command[1] == 0) {
+			CD.audio_status = 0; // Playing
+		} else {
+			CD.audio_status = 2; // Paused
+		}
+		cdc_set_good_status();
+		break;
+	}
+
+	case 0xD9: { // SAPEP — Set Audio Playback End Position
+		uint32_t lba = parse_audio_lba(CD.scsi_command);
+		switch (CD.scsi_command[1]) {
+		case 0:
+			CD.audio_status = 3; // Stopped
+			cdc_set_good_status();
+			break;
+		case 1:
+			CD.audio_end_lba  = lba;
+			CD.audio_end_mode = 1; // Loop
+			CD.audio_status   = 0; // Playing
+			CD.phase = CDC_PHASE_BUSY;
+			break;
+		case 2:
+			CD.audio_end_lba  = lba;
+			CD.audio_end_mode = 2; // IRQ
+			CD.audio_status   = 0; // Playing
+			CD.phase = CDC_PHASE_BUSY;
+			break;
+		case 3:
+			CD.audio_end_lba  = lba;
+			CD.audio_end_mode = 3; // Stop
+			cdc_set_good_status();
+			break;
+		default:
+			cdc_set_good_status();
+			break;
+		}
+		break;
+	}
+
+	case 0xDA: // PAUSE
+		CD.audio_status = 2; // Paused
 		cdc_set_good_status();
 		break;
 
@@ -729,13 +799,20 @@ static void cdc_process_command(void)
 		uint8_t subq[10];
 		memset(subq, 0, sizeof(subq));
 		subq[0] = CD.audio_status;
-		subq[1] = bin2bcd(CD.first_track);
+		int ti = find_track(CD.audio_cur_lba);
+		if (ti < 0) ti = 0;
+		cd_track_t *qt = &CD.tracks[ti];
+		subq[1] = bin2bcd(qt->track_no);
 		subq[2] = 0x01;
-		uint8_t m, s, f;
-		lba_to_msf(0, &m, &s, &f);
-		subq[6] = bin2bcd(m);
-		subq[7] = bin2bcd(s);
-		subq[8] = bin2bcd(f);
+		uint32_t rel = CD.audio_cur_lba - qt->lba_start;
+		subq[3] = bin2bcd(rel / 4500);
+		subq[4] = bin2bcd((rel / 75) % 60);
+		subq[5] = bin2bcd(rel % 75);
+		uint8_t am, as, af;
+		lba_to_msf(CD.audio_cur_lba, &am, &as, &af);
+		subq[6] = bin2bcd(am);
+		subq[7] = bin2bcd(as);
+		subq[8] = bin2bcd(af);
 		cdc_data_in(subq, 10);
 		break;
 	}
@@ -964,11 +1041,10 @@ static void adpcm_set_end_reached(bool val)
 
 static void adpcm_set_half_reached(bool val)
 {
-	if (val)
-		cdc_active_irqs |= 0x04;
-	else
-		cdc_active_irqs &= ~0x04;
-	cdc_update_irqs();
+	// Stubbed: without ADPCM playback the length counter never counts
+	// down, so the half-reached flag would stay set forever after a
+	// length latch — blocking BIOS code that polls $1803 for zero.
+	(void)val;
 }
 
 static bool adpcm_length_latch_enabled(void)
@@ -980,12 +1056,12 @@ static void adpcm_process_write(uint8_t data)
 {
 	CD.adpcm_ram[CD.adpcm_write_addr++] = data;
 
-	if (CD.adpcm_length == 0)
-		adpcm_set_end_reached(true);
-	adpcm_set_half_reached(CD.adpcm_length < 0x8000);
-
-	if (!adpcm_length_latch_enabled())
+	if (!adpcm_length_latch_enabled()) {
 		CD.adpcm_length = (CD.adpcm_length + 1) & 0x1FFFF;
+		if (CD.adpcm_length == 0)
+			adpcm_set_end_reached(true);
+		adpcm_set_half_reached(CD.adpcm_length < 0x8000);
+	}
 }
 
 static void adpcm_run_dma(void)
@@ -997,8 +1073,12 @@ static void adpcm_run_dma(void)
 
 	while (scsi_req && CD.phase == CDC_PHASE_DATA_IN) {
 		CD.adpcm_ram[CD.adpcm_write_addr++] = scsi_read_port;
-		if (!adpcm_length_latch_enabled())
+		if (!adpcm_length_latch_enabled()) {
 			CD.adpcm_length = (CD.adpcm_length + 1) & 0x1FFFF;
+			if (CD.adpcm_length == 0)
+				adpcm_set_end_reached(true);
+			adpcm_set_half_reached(CD.adpcm_length < 0x8000);
+		}
 		scsi_ack = true;
 		cdc_update_state();
 		scsi_ack = false;
@@ -1181,6 +1261,7 @@ cd_read(uint16_t addr)
 		case CDC_PHASE_DATA_IN:  s = 0x88; break;  // BSY + IO
 		case CDC_PHASE_STATUS:   s = 0x98; break;  // BSY + CD + IO
 		case CDC_PHASE_MESSAGE:  s = 0xB8; break;  // BSY + MSG + CD + IO
+		case CDC_PHASE_BUSY:     s = 0x80; break;  // BSY only (audio playing)
 		default: break;
 		}
 		if (scsi_req) s |= 0x40;
@@ -1205,6 +1286,12 @@ cd_read(uint16_t addr)
 	// --- $1803: active IRQs + BRAM lock ---
 	case 0x1803: {
 		uint8_t v = cdc_active_irqs;
+		// Clear event-based IRQ bits on read. Bits 0x20/0x40 are level-
+		// sensitive (SCSI phase); 0x04/0x08/0x10 are events (ADPCM half,
+		// ADPCM end, SubCode). Without ADPCM playback the half/end flags
+		// would stay set forever after a length latch.
+		cdc_active_irqs &= ~(0x04 | 0x08 | 0x10);
+		cdc_update_irqs();
 		CD.bram_locked = true;
 		return v;
 	}
@@ -1333,6 +1420,8 @@ cd_write(uint16_t addr, uint8_t val)
 			scsi_msg_done = false;
 			cdc_active_irqs = 0;
 			CD.irq_mask &= 0x8F;
+			CD.audio_status = 3; // Stopped
+			cd_audio_flush_ring();
 			cdc_update_irqs();
 		}
 		break;
@@ -1374,6 +1463,13 @@ cd_write(uint16_t addr, uint8_t val)
 		if (val & 0x10) {
 			CD.adpcm_length = CD.adpcm_addr_port;
 			adpcm_set_end_reached(false);
+			adpcm_set_half_reached(CD.adpcm_length < 0x8000);
+		}
+		// Bit 5: play start. No real ADPCM decoder yet, so signal
+		// instant completion so games don't hang waiting for end.
+		if ((val & 0x20) && !(prev & 0x20)) {
+			CD.adpcm_length = 0;
+			adpcm_set_end_reached(true);
 		}
 		if (val & 0x80) {
 			CD.adpcm_read_addr = 0;
@@ -1481,6 +1577,183 @@ cd_setup_memory_map(void)
 	}
 }
 
+// ---------------------------------------------------------------------------
+// CD Audio playback
+// ---------------------------------------------------------------------------
+
+static int open_bin_for_audio(int idx)
+{
+	cd_track_t *t = &CD.tracks[idx];
+	if (audio_fil && strcmp(audio_bin_name, t->bin_name) == 0)
+		return 0;
+	if (audio_fil)
+		f_close(audio_fil);
+	else {
+		audio_fil = frens_f_malloc(sizeof(FIL));
+		if (!audio_fil) return -1;
+	}
+	static char path[256];
+	snprintf(path, sizeof(path), "%s%s", CD.cue_dir, t->bin_name);
+	if (f_open(audio_fil, path, FA_READ) != FR_OK) {
+		audio_bin_name[0] = '\0';
+		return -1;
+	}
+	strncpy(audio_bin_name, t->bin_name, CD_BIN_NAME_MAX - 1);
+	audio_bin_name[CD_BIN_NAME_MAX - 1] = '\0';
+	return 0;
+}
+
+static int find_track_by_number(int track_no)
+{
+	for (int i = 0; i < CD.num_tracks; i++) {
+		if (CD.tracks[i].track_no == track_no)
+			return i;
+	}
+	return -1;
+}
+
+static uint32_t parse_audio_lba(const uint8_t *cmd)
+{
+	switch (cmd[9] & 0xC0) {
+	case 0x00:
+		return ((uint32_t)cmd[3] << 16) | ((uint32_t)cmd[4] << 8) | cmd[5];
+	case 0x40: {
+		uint32_t lba = (uint32_t)bcd2bin(cmd[2]) * 4500
+		             + (uint32_t)bcd2bin(cmd[3]) * 75
+		             + (uint32_t)bcd2bin(cmd[4]);
+		return (lba >= 150) ? lba - 150 : 0;
+	}
+	case 0x80: {
+		int trk = bcd2bin(cmd[2]);
+		int idx = find_track_by_number(trk);
+		return (idx >= 0) ? CD.tracks[idx].lba_start : 0;
+	}
+	}
+	return 0;
+}
+
+static void cd_audio_flush_ring(void)
+{
+	CD.audio_ring_write = 0;
+	CD.audio_ring_read = 0;
+	CD.audio_ring_count = 0;
+}
+
+void
+cd_audio_update(void)
+{
+	if (CD.audio_status != 0)  // 0 = Playing
+		return;
+	if (!CD.audio_ring_buf)
+		return;
+
+	int reads = 0;
+	while (CD.audio_ring_count < 4 && reads < 2) {
+		uint32_t next_lba = CD.audio_cur_lba + CD.audio_ring_count;
+		if (next_lba >= CD.audio_end_lba)
+			break;
+
+		int idx = find_track(next_lba);
+		if (idx < 0 || CD.tracks[idx].type != 0)
+			break;
+		if (open_bin_for_audio(idx) != 0)
+			break;
+
+		cd_track_t *t = &CD.tracks[idx];
+		uint64_t off = t->bin_offset + (uint64_t)(next_lba - t->lba_start) * CD_RAW_SECTOR_SIZE;
+		if (f_lseek(audio_fil, off) != FR_OK)
+			break;
+		uint8_t *dst = &CD.audio_ring_buf[CD.audio_ring_write * CD_RAW_SECTOR_SIZE];
+		UINT br;
+		if (f_read(audio_fil, dst, CD_RAW_SECTOR_SIZE, &br) != FR_OK
+		    || br != CD_RAW_SECTOR_SIZE)
+			break;
+
+		CD.audio_ring_write = (CD.audio_ring_write + 1) & 3;
+		CD.audio_ring_count++;
+		reads++;
+	}
+}
+
+int
+cd_audio_generate_samples(int16_t *out, int num_samples)
+{
+	if (CD.audio_status != 0 || !CD.audio_ring_buf)
+		return 0;
+
+	int generated = 0;
+	while (generated < num_samples) {
+		if (CD.audio_ring_count == 0) {
+			memset(out + generated * 2, 0, (num_samples - generated) * 4);
+			break;
+		}
+
+		const uint8_t *sector = &CD.audio_ring_buf[CD.audio_ring_read * CD_RAW_SECTOR_SIZE];
+		const int16_t *pcm = (const int16_t *)(sector + CD.audio_cur_sample * 4);
+		out[generated * 2]     = pcm[0];
+		out[generated * 2 + 1] = pcm[1];
+		generated++;
+		CD.audio_cur_sample++;
+
+		if (CD.audio_cur_sample >= 588) {
+			CD.audio_cur_sample = 0;
+			CD.audio_ring_read = (CD.audio_ring_read + 1) & 3;
+			CD.audio_ring_count--;
+			CD.audio_cur_lba++;
+
+			cdc_active_irqs |= 0x10;
+			cdc_update_irqs();
+
+			if (CD.audio_cur_lba >= CD.audio_end_lba) {
+				switch (CD.audio_end_mode) {
+				case 0: // stop
+				default:
+					CD.audio_status = 3;
+					break;
+				case 1: // loop
+					CD.audio_cur_lba = CD.audio_start_lba;
+					cd_audio_flush_ring();
+					break;
+				case 2: // IRQ
+					CD.audio_status = 3;
+					cdc_set_good_status();
+					break;
+				case 3: // stop (status already returned)
+					CD.audio_status = 3;
+					break;
+				}
+				if (CD.audio_status != 0)
+					break;
+			}
+		}
+	}
+	return generated;
+}
+
+// ---------------------------------------------------------------------------
+// BRAM persistence
+// ---------------------------------------------------------------------------
+
+// Check for the "HUBM" signature; if missing, write the standard
+// empty-but-formatted header so the BIOS and games see valid BRAM.
+static void bram_ensure_formatted(void)
+{
+	if (!CD.bram) return;
+	if (CD.bram[0] == 'H' && CD.bram[1] == 'U' &&
+	    CD.bram[2] == 'B' && CD.bram[3] == 'M')
+		return;
+	memset(CD.bram, 0, 0x800);
+	CD.bram[0] = 0x48; // 'H'
+	CD.bram[1] = 0x55; // 'U'
+	CD.bram[2] = 0x42; // 'B'
+	CD.bram[3] = 0x4D; // 'M'
+	CD.bram[4] = 0x00;
+	CD.bram[5] = 0x88;
+	CD.bram[6] = 0x10;
+	CD.bram[7] = 0x80;
+	printf("BRAM: formatted (empty header)\n");
+}
+
 int
 cd_bram_save(const char *path)
 {
@@ -1501,12 +1774,18 @@ cd_bram_load(const char *path)
 {
 	static FIL fil;
 	if (!CD.bram || !path) return -1;
-	if (f_open(&fil, path, FA_READ) != FR_OK)
+	if (f_open(&fil, path, FA_READ) != FR_OK) {
+		bram_ensure_formatted();
 		return -1;
+	}
 	UINT br;
 	FRESULT r = f_read(&fil, CD.bram, 0x800, &br);
 	f_close(&fil);
-	if (r != FR_OK || br != 0x800) return -1;
+	if (r != FR_OK || br != 0x800) {
+		bram_ensure_formatted();
+		return -1;
+	}
 	printf("BRAM: loaded from %s\n", path);
+	bram_ensure_formatted();
 	return 0;
 }

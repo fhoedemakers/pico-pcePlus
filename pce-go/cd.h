@@ -37,6 +37,7 @@ typedef enum {
 	CDC_PHASE_DATA_OUT,
 	CDC_PHASE_STATUS,
 	CDC_PHASE_MESSAGE,
+	CDC_PHASE_BUSY,
 } cdc_phase_t;
 
 // BIOS variants identified by CRC
@@ -120,8 +121,19 @@ typedef struct {
 	uint8_t  sense_asc;
 	uint8_t  sense_ascq;
 
-	// Audio status (stub for Phase 1)
-	uint8_t  audio_status;      // 0 = stopped, 1 = playing, 2 = paused
+	// CD Audio playback
+	uint8_t  audio_status;      // 0=playing, 1=inactive, 2=paused, 3=stopped
+	uint32_t audio_start_lba;
+	uint32_t audio_end_lba;
+	uint32_t audio_cur_lba;
+	uint16_t audio_cur_sample;  // 0-587 within current sector
+	uint8_t  audio_end_mode;    // 0=stop, 1=loop, 2=IRQ, 3=stop+status
+
+	// Audio sector ring buffer (PSRAM-allocated, 4 * CD_RAW_SECTOR_SIZE)
+	uint8_t  *audio_ring_buf;
+	uint8_t  audio_ring_write;
+	uint8_t  audio_ring_read;
+	uint8_t  audio_ring_count;  // filled slots (0-4)
 
 	// IRQ state
 	uint8_t  irq_mask;
@@ -156,6 +168,10 @@ void cd_setup_memory_map(void);
 // Disc image management
 int  cd_load_cue(const char *cue_path);
 void cd_close(void);
+
+// CD Audio (called from main loop each frame)
+void cd_audio_update(void);
+int  cd_audio_generate_samples(int16_t *out, int num_samples);
 
 // BRAM persistence
 int  cd_bram_save(const char *path);

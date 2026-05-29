@@ -201,9 +201,11 @@ void __not_in_flash_func(psg_update)(int16_t *output, size_t length, uint32_t ch
 	}
 
 	memset(output, 0, length * sizeof(int16_t));
-
+#if 1
 	static sample_t mix_buffer[((44100 / 60) * 2) + 2];
-
+#else
+	static sample_t mix_buffer[256]; // Use this to test buffer overflow
+#endif
 	for (int i = 0; i < PSG_CHANNELS; i++)
 	{
 		psg_update_chan(mix_buffer, i, length);

@@ -332,12 +332,14 @@ LoadDisc(const char *cue_path)
 	}
 
 	// --- 3. Allocate CD/SCD/ADPCM/Arcade Card RAM + BRAM page ---
-	CD.cd_ram    = (uint8_t *)frens_f_malloc(CD_RAM_SIZE);
-	CD.scd_ram   = (uint8_t *)frens_f_malloc(SCD_RAM_SIZE);
-	CD.adpcm_ram = (uint8_t *)frens_f_malloc(ADPCM_RAM_SIZE);
-	CD.acd_ram   = (uint8_t *)frens_f_malloc(ACD_RAM_SIZE);
-	CD.bram      = (uint8_t *)frens_f_malloc(BRAM_PAGE_SIZE);
-	if (!CD.cd_ram || !CD.scd_ram || !CD.adpcm_ram || !CD.acd_ram || !CD.bram) {
+	CD.cd_ram         = (uint8_t *)frens_f_malloc(CD_RAM_SIZE);
+	CD.scd_ram        = (uint8_t *)frens_f_malloc(SCD_RAM_SIZE);
+	CD.adpcm_ram      = (uint8_t *)frens_f_malloc(ADPCM_RAM_SIZE);
+	CD.acd_ram        = (uint8_t *)frens_f_malloc(ACD_RAM_SIZE);
+	CD.bram           = (uint8_t *)frens_f_malloc(BRAM_PAGE_SIZE);
+	CD.audio_ring_buf = (uint8_t *)frens_f_malloc(4 * CD_RAW_SECTOR_SIZE);
+	if (!CD.cd_ram || !CD.scd_ram || !CD.adpcm_ram || !CD.acd_ram || !CD.bram
+	    || !CD.audio_ring_buf) {
 		MESSAGE_ERROR("CD/Arcade Card RAM allocation failed\n");
 		unload_disc_state();
 		return -2;

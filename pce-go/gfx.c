@@ -582,6 +582,11 @@ void __not_in_flash_func(gfx_run)(void)
 		if (SpHitON && sprite_hit_check()) {
 			gfx_irq(VDC_STAT_CR);
 		}
+		// VBlank status bit is always set (hardware flag) — the BIOS
+		// polls $0000 for VBlank with IRQs disabled during screen
+		// transitions. gfx_irq() alone won't set the bit when IRQ1
+		// is already pending, so set it directly too.
+		PCE.VDC.status |= 1 << VDC_STAT_VD;
 		if (VBlankON) {
 			gfx_irq(VDC_STAT_VD);
 		}
