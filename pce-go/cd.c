@@ -12,6 +12,7 @@
 #include <ctype.h>
 
 #include "pico.h"
+#include "pico/mutex.h"
 #include "ff.h"
 
 #include "pce-go.h"
@@ -33,6 +34,10 @@ extern void  frens_f_free(void *ptr);
 
 // Global CD state (zero-initialized).
 cd_state_t CD;
+
+// Mutex protecting all FatFS calls so core1 can do audio reads safely.
+static mutex_t sd_mutex;
+static bool sd_mutex_inited = false;
 
 // SCSI bus signal state
 static bool scsi_req = false;
@@ -119,6 +124,10 @@ cd_init(void)
 {
 	memset(&CD, 0, sizeof(CD));
 	CD.audio_status = 1; // Inactive
+	if (!sd_mutex_inited) {
+		mutex_init(&sd_mutex);
+		sd_mutex_inited = true;
+	}
 	return 0;
 }
 
@@ -188,7 +197,7 @@ cd_term(void)
 	if (CD.adpcm_ram)      { frens_f_free(CD.adpcm_ram);      CD.adpcm_ram = NULL; }
 	if (CD.acd_ram)        { frens_f_free(CD.acd_ram);        CD.acd_ram = NULL; }
 	if (CD.bram)           { frens_f_free(CD.bram);           CD.bram = NULL; }
-	if (CD.audio_ring_buf) { frens_f_free(CD.audio_ring_buf); CD.audio_ring_buf = NULL; }
+	// audio_ring_buf is a static SRAM array — don't free it
 
 	// LoadDisc() allocated PCE.ROM via frens_f_malloc (PSRAM), so we own
 	// that buffer when a CD was attached. Releasing it here — and clearing
@@ -655,12 +664,14 @@ static int read_sector(uint32_t lba)
 	uint64_t off = t->bin_offset + (uint64_t)(lba - t->lba_start) * raw;
 	if (raw == CD_RAW_SECTOR_SIZE) off += 16;
 
-	if (f_lseek(bin_fil, off) != FR_OK) return -1;
-	UINT br;
-	if (f_read(bin_fil, CD.sector_buf, CD_SECTOR_SIZE, &br) != FR_OK
-	    || br != CD_SECTOR_SIZE)
-		return -1;
-	return 0;
+	mutex_enter_blocking(&sd_mutex);
+	int ok = (f_lseek(bin_fil, off) == FR_OK);
+	UINT br = 0;
+	if (ok)
+		ok = (f_read(bin_fil, CD.sector_buf, CD_SECTOR_SIZE, &br) == FR_OK
+		      && br == CD_SECTOR_SIZE);
+	mutex_exit(&sd_mutex);
+	return ok ? 0 : -1;
 }
 
 // ---------------------------------------------------------------------------
@@ -1659,11 +1670,14 @@ static uint32_t parse_audio_lba(const uint8_t *cmd)
 	return 0;
 }
 
+static uint32_t audio_next_file_off = 0xFFFFFFFF;
+
 static void cd_audio_flush_ring(void)
 {
 	CD.audio_ring_write = 0;
 	CD.audio_ring_read = 0;
 	CD.audio_ring_count = 0;
+	audio_next_file_off = 0xFFFFFFFF;
 }
 
 void
@@ -1675,29 +1689,42 @@ cd_audio_update(void)
 		return;
 
 	int reads = 0;
-	while (CD.audio_ring_count < 4 && reads < 2) {
-		uint32_t next_lba = CD.audio_cur_lba + CD.audio_ring_count;
+	while (__atomic_load_n(&CD.audio_ring_count, __ATOMIC_ACQUIRE) < 4
+	       && reads < 2) {
+		uint32_t next_lba = CD.audio_cur_lba
+		                  + __atomic_load_n(&CD.audio_ring_count, __ATOMIC_ACQUIRE);
 		if (next_lba >= CD.audio_end_lba)
 			break;
 
 		int idx = find_track(next_lba);
 		if (idx < 0 || CD.tracks[idx].type != 0)
 			break;
-		if (open_bin_for_audio(idx) != 0)
-			break;
 
 		cd_track_t *t = &CD.tracks[idx];
 		uint64_t off = t->bin_offset + (uint64_t)(next_lba - t->lba_start) * CD_RAW_SECTOR_SIZE;
-		if (f_lseek(audio_fil, off) != FR_OK)
+
+		mutex_enter_blocking(&sd_mutex);
+		if (open_bin_for_audio(idx) != 0) {
+			mutex_exit(&sd_mutex);
 			break;
+		}
+		if (off != audio_next_file_off) {
+			if (f_lseek(audio_fil, off) != FR_OK) {
+				mutex_exit(&sd_mutex);
+				break;
+			}
+		}
 		uint8_t *dst = &CD.audio_ring_buf[CD.audio_ring_write * CD_RAW_SECTOR_SIZE];
 		UINT br;
-		if (f_read(audio_fil, dst, CD_RAW_SECTOR_SIZE, &br) != FR_OK
-		    || br != CD_RAW_SECTOR_SIZE)
-			break;
+		int ok = (f_read(audio_fil, dst, CD_RAW_SECTOR_SIZE, &br) == FR_OK
+		          && br == CD_RAW_SECTOR_SIZE);
+		mutex_exit(&sd_mutex);
+
+		if (!ok) break;
+		audio_next_file_off = off + CD_RAW_SECTOR_SIZE;
 
 		CD.audio_ring_write = (CD.audio_ring_write + 1) & 3;
-		CD.audio_ring_count++;
+		__atomic_add_fetch(&CD.audio_ring_count, 1, __ATOMIC_RELEASE);
 		reads++;
 	}
 }
@@ -1710,22 +1737,23 @@ cd_audio_generate_samples(int16_t *out, int num_samples)
 
 	int generated = 0;
 	while (generated < num_samples) {
-		if (CD.audio_ring_count == 0) {
+		if (__atomic_load_n(&CD.audio_ring_count, __ATOMIC_ACQUIRE) == 0) {
 			memset(out + generated * 2, 0, (num_samples - generated) * 4);
 			break;
 		}
 
 		const uint8_t *sector = &CD.audio_ring_buf[CD.audio_ring_read * CD_RAW_SECTOR_SIZE];
-		const int16_t *pcm = (const int16_t *)(sector + CD.audio_cur_sample * 4);
-		out[generated * 2]     = pcm[0];
-		out[generated * 2 + 1] = pcm[1];
-		generated++;
-		CD.audio_cur_sample++;
+		int avail = 588 - CD.audio_cur_sample;
+		int want  = num_samples - generated;
+		int n     = (avail < want) ? avail : want;
+		memcpy(out + generated * 2, sector + CD.audio_cur_sample * 4, n * 4);
+		generated += n;
+		CD.audio_cur_sample += n;
 
 		if (CD.audio_cur_sample >= 588) {
 			CD.audio_cur_sample = 0;
 			CD.audio_ring_read = (CD.audio_ring_read + 1) & 3;
-			CD.audio_ring_count--;
+			__atomic_sub_fetch(&CD.audio_ring_count, 1, __ATOMIC_RELEASE);
 			CD.audio_cur_lba++;
 
 			cdc_active_irqs |= 0x10;

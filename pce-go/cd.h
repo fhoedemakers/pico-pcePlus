@@ -129,7 +129,7 @@ typedef struct {
 	uint16_t audio_cur_sample;  // 0-587 within current sector
 	uint8_t  audio_end_mode;    // 0=stop, 1=loop, 2=IRQ, 3=stop+status
 
-	// Audio sector ring buffer (PSRAM-allocated, 4 * CD_RAW_SECTOR_SIZE)
+	// Audio sector ring buffer (4 * CD_RAW_SECTOR_SIZE)
 	uint8_t  *audio_ring_buf;
 	uint8_t  audio_ring_write;
 	uint8_t  audio_ring_read;

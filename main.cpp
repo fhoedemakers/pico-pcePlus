@@ -209,7 +209,9 @@ extern "C" void __not_in_flash_func(osd_gfx_lines_rendered)(int first_line, int 
     if (right < 320)
         memset(dst + right, 0, (320 - right) * sizeof(uint16_t));
 
-    if (settings.flags.displayFrameRate && display_y >= FPSSTART && display_y < FPSEND)
+    if (settings.flags.displayFrameRate &&
+        display_y >= current_y_offset + FPSSTART &&
+        display_y <  current_y_offset + FPSEND)
     {
         WORD *fpsBuffer = dst + current_x_offset + 4;
         int rowInChar = display_y % 8;
@@ -243,8 +245,12 @@ static void __not_in_flash_func(pushAudioAndOverlay)()
 {
     if (CD.cd_attached) {
         cd_adpcm_update();
-        if (CD.audio_status == 0) {
+#if !HSTX
+        // PicoDVI: core1 has no spare cycles, so read from SD here on core0.
+        if (CD.audio_status == 0)
             cd_audio_update();
+#endif
+        if (CD.audio_status == 0) {
             int n = cd_audio_generate_samples(cd_audio_buffer, PCE_SAMPLES_PER_FRAME);
             for (int i = 0; i < n * 2; i++) {
                 int32_t v = (int32_t)pce_audio_buffer[i] + (int32_t)cd_audio_buffer[i];
@@ -852,9 +858,19 @@ int main()
             }
 
             printf("Starting game\n");
+#if HSTX
+            if (isCDGame) {
+                extern void video_output_set_background_task(void (*)(void));
+                video_output_set_background_task(cd_audio_update);
+            }
+#endif
             Frens::PaceFrames60fps(true);
             process();
             if (isCDGame) {
+#if HSTX
+                extern void video_output_set_background_task(void (*)(void));
+                video_output_set_background_task(nullptr);
+#endif
                 char bramPath[50];
                 snprintf(bramPath, sizeof(bramPath), SAVESTATEDIR);
                 f_mkdir(bramPath);
