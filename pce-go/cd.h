@@ -173,6 +173,9 @@ void cd_close(void);
 void cd_audio_update(void);
 int  cd_audio_generate_samples(int16_t *out, int num_samples);
 
+// ADPCM playback timing (no decode — just length countdown at correct rate)
+void cd_adpcm_update(void);
+
 // BRAM persistence
 int  cd_bram_save(const char *path);
 int  cd_bram_load(const char *path);

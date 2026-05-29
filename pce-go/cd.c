@@ -513,7 +513,7 @@ cd_load_cue(const char *cue_path)
 		cd_track_t *t = &CD.tracks[i];
 		uint32_t raw = t->sector_size ? CD_RAW_SECTOR_SIZE : CD_SECTOR_SIZE;
 
-		t->lba_start  = running_lba;
+		t->lba_start  = running_lba + t->file_lba;
 		t->bin_offset = (uint64_t)t->file_lba * raw;
 
 		uint32_t length_lbas = 0;
@@ -1341,7 +1341,9 @@ cd_read(uint16_t addr)
 		return v;
 	}
 	case 0x180B: return CD.adpcm_dma_ctrl;
-	case 0x180C: return CD.adpcm_status;
+	case 0x180C:
+		return CD.adpcm_status
+		     | ((CD.adpcm_ctrl & 0x20) ? 0x08 : 0);
 	case 0x180D: return 0x00;
 	case 0x180E: return CD.adpcm_rate;
 
@@ -1465,12 +1467,6 @@ cd_write(uint16_t addr, uint8_t val)
 			adpcm_set_end_reached(false);
 			adpcm_set_half_reached(CD.adpcm_length < 0x8000);
 		}
-		// Bit 5: play start. No real ADPCM decoder yet, so signal
-		// instant completion so games don't hang waiting for end.
-		if ((val & 0x20) && !(prev & 0x20)) {
-			CD.adpcm_length = 0;
-			adpcm_set_end_reached(true);
-		}
 		if (val & 0x80) {
 			CD.adpcm_read_addr = 0;
 			CD.adpcm_write_addr = 0;
@@ -1574,6 +1570,37 @@ cd_setup_memory_map(void)
 			PCE.MemoryMapR[i] = PCE.IOAREA;
 			PCE.MemoryMapW[i] = PCE.IOAREA;
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ADPCM playback timing (stub — no audio decode, just length countdown)
+// ---------------------------------------------------------------------------
+
+void
+cd_adpcm_update(void)
+{
+	// Only tick when play bit ($180D bit 5) is set
+	if (!(CD.adpcm_ctrl & 0x20))
+		return;
+	if (CD.adpcm_status & 0x01) // already ended
+		return;
+
+	// Mesen2: freq = 32000 / (16 - (rate & 0x0F))
+	// Length decrements once per 2 samples (each full byte = 2 nibbles).
+	// Per frame at 60fps: decrements = freq / 120
+	int rate_val = CD.adpcm_rate & 0x0F;
+	int denom = 16 - rate_val;
+	if (denom <= 0) denom = 1;
+	uint32_t dec = 32000 / (denom * 120);
+	if (dec < 1) dec = 1;
+
+	if (CD.adpcm_length <= dec) {
+		CD.adpcm_length = 0;
+		adpcm_set_end_reached(true);
+	} else {
+		CD.adpcm_length -= dec;
+		adpcm_set_half_reached(CD.adpcm_length < 0x8000);
 	}
 }
 
