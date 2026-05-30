@@ -4,6 +4,7 @@ fh.log
 *.fds
 *.wav
 *.nsf
+.claude
 CMakePresets.json
 /pimoroni-pico/
 # Prerequisites
