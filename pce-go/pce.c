@@ -637,18 +637,15 @@ void __not_in_flash_func(pce_writeIO)(uint16_t A, uint8_t V)
 			return;
 
 		case 6:                                 // Put a value into the waveform or direct audio buffers
-			switch (PCE.PSG.chan[PCE.PSG.ch].control & 0xC0)
-			{
-			case 0: // Write to the wave buffer and increment the counter
-				PCE.PSG.chan[PCE.PSG.ch].wave_data[PCE.PSG.chan[PCE.PSG.ch].wave_index] = V & 0x1F;
-				PCE.PSG.chan[PCE.PSG.ch].wave_index++; // Inc pointer
-				PCE.PSG.chan[PCE.PSG.ch].wave_index &= 0x1F; // Wrap at 32
-				break;
-			case PSG_CHAN_ENABLE|PSG_DDA_ENABLE: // Update DDA sample
+			if (PCE.PSG.chan[PCE.PSG.ch].control & PSG_DDA_ENABLE) {
+				// DDA mode: buffer sample for playback
 				PCE.PSG.chan[PCE.PSG.ch].dda_data[PCE.PSG.chan[PCE.PSG.ch].dda_index] = V & 0x1F;
 				PCE.PSG.chan[PCE.PSG.ch].dda_count = MIN(PCE.PSG.chan[PCE.PSG.ch].dda_count+1, 0x100);
 				PCE.PSG.chan[PCE.PSG.ch].dda_index = (PCE.PSG.chan[PCE.PSG.ch].dda_index+1) & 0xFF;
-				break;
+			} else {
+				// Wave mode: write to the wave buffer
+				PCE.PSG.chan[PCE.PSG.ch].wave_data[PCE.PSG.chan[PCE.PSG.ch].wave_index] = V & 0x1F;
+				PCE.PSG.chan[PCE.PSG.ch].wave_index = (PCE.PSG.chan[PCE.PSG.ch].wave_index + 1) & 0x1F;
 			}
 			return;
 

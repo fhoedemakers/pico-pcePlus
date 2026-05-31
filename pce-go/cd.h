@@ -80,6 +80,15 @@ typedef struct {
 	uint8_t  adpcm_rate;
 	uint8_t  adpcm_fade;
 
+	// ADPCM playback decoder state (Oki/Dialogic 4-bit ADPCM)
+	uint8_t  adpcm_playing;     // 1 while decoding samples
+	uint8_t  adpcm_nibble;      // 0 = high nibble next, 1 = low nibble next
+	uint8_t  adpcm_magnitude;   // step index (0-48)
+	uint16_t adpcm_cur_output;  // 12-bit running output (centered at 2048)
+	uint16_t adpcm_play_addr;   // read pointer used by the decoder
+	uint16_t adpcm_play_len;    // remaining bytes for the decoder
+	uint32_t adpcm_resample_acc; // fixed-point accumulator for rate convert
+
 	// BRAM (battery-backed save RAM): 8KB page allocated in PSRAM.
 	// Only the first 0x800 bytes are real BRAM; the remaining 6KB mimics
 	// open-bus behaviour (filled with 0xFF). Save/load operates on the
@@ -173,8 +182,10 @@ void cd_close(void);
 void cd_audio_update(void);
 int  cd_audio_generate_samples(int16_t *out, int num_samples);
 
-// ADPCM playback timing (no decode — just length countdown at correct rate)
-void cd_adpcm_update(void);
+// ADPCM playback: decode 4-bit ADPCM to PCM at the programmed rate,
+// resampled to the host rate and summed into out[]. Returns true if any
+// ADPCM samples were mixed (i.e. ADPCM is currently playing).
+bool cd_adpcm_generate_samples(int16_t *out, int num_samples, int host_rate);
 
 // BRAM persistence
 int  cd_bram_save(const char *path);

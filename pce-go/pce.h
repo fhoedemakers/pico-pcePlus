@@ -291,6 +291,8 @@ uint8_t pce_readIO(uint16_t A);
 	else page[a] = b;								\
 }
 
+#if defined(__ARM_FEATURE_UNALIGNED) && __ARM_FEATURE_UNALIGNED
+// Target supports unaligned access (e.g. Cortex-M33 / RP2350): fast cast.
 #define pce_read16(addr) ({							\
 	uint16_t a = (addr); 							\
 	*((uint16_t*)(PageR[a >> 13] + a));				\
@@ -300,6 +302,21 @@ uint8_t pce_readIO(uint16_t A);
 	uint16_t a = (addr), w = (word); 				\
 	*((uint16_t*)(PageW[a >> 13] + a)) = w;			\
 }
+#else
+// Cortex-M0+ (RP2040) and other targets without unaligned access: a
+// halfword read at an odd address hard-faults, so go byte-wise (LE).
+#define pce_read16(addr) ({							\
+	uint16_t a = (addr); 							\
+	uint8_t *p16 = PageR[a >> 13] + a;				\
+	(uint16_t)(p16[0] | (p16[1] << 8));				\
+})
+
+#define pce_write16(addr, word) {					\
+	uint16_t a = (addr), w = (word); 				\
+	uint8_t *p16 = PageW[a >> 13] + a;				\
+	p16[0] = (uint8_t)w; p16[1] = (uint8_t)(w >> 8);\
+}
+#endif
 
 #else
 
@@ -328,13 +345,24 @@ pce_write8(uint16_t addr, uint8_t byte)
 static inline uint16_t
 pce_read16(uint16_t addr)
 {
+#if defined(__ARM_FEATURE_UNALIGNED) && __ARM_FEATURE_UNALIGNED
 	return (*((uint16_t*)(PageR[addr >> 13] + (addr))));
+#else
+	// Cortex-M0+ (RP2040) cannot do unaligned 16-bit access.
+	uint8_t *p = PageR[addr >> 13] + addr;
+	return (uint16_t)(p[0] | (p[1] << 8));
+#endif
 }
 
 static inline void
 pce_write16(uint16_t addr, uint16_t word)
 {
+#if defined(__ARM_FEATURE_UNALIGNED) && __ARM_FEATURE_UNALIGNED
 	*((uint16_t*)(PageW[addr >> 13] + (addr))) = word;
+#else
+	uint8_t *p = PageW[addr >> 13] + addr;
+	p[0] = (uint8_t)word; p[1] = (uint8_t)(word >> 8);
+#endif
 }
 
 #endif

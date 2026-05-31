@@ -154,6 +154,14 @@ set(PCE_FLAGS -DNDEBUG)
 target_compile_definitions(${projectname} PRIVATE
     ${PCE_FLAGS}
     DVICONFIG=${DVICONFIG}
+    # Larger I2S ring (default 1024 ≈ 23ms) so CD audio-clock pacing has a
+    # ≥2-frame buffer to lock onto — matches the HDMI ring depth, holds ~46ms
+    # at half fill, and lets frame-skip refill it in render-bound scenes.
+    I2S_AUDIO_RING_SIZE=4096
+    # Default HSTX audio DI watermark (200) is barely above steady-state (184),
+    # so any frame-time variance causes sample drops → crackling. The 512-entry
+    # DI ring has room; raise the watermark to give ~36ms of buffer before drops.
+    HSTX_AUDIO_DI_HIGH_WATERMARK=400
     SDCARD_PIN_CS=${SD_CS}
     SDCARD_PIN_SCK=${SD_SCK}
     SDCARD_PIN_MOSI=${SD_MOSI}
@@ -194,6 +202,7 @@ target_compile_definitions(${projectname} PRIVATE
     WIIPAD_DELAYED_START=${WIIPAD_DELAYED_START}
     ENABLEDVI=1
     DOUBLEFRAMEBUFFER=0
+    DI_RING_BUFFER_SIZE=512
     #HSTX_DEBUG=1
 )
 

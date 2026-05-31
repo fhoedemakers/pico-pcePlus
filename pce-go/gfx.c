@@ -431,10 +431,23 @@ void __not_in_flash_func(gfx_latch_context)(int force)
 /*
 	Render lines into the buffer from min_line to max_line (inclusive)
 */
+static bool gfx_skip_render = false;
+
+void gfx_set_skip_render(bool skip)
+{
+	gfx_skip_render = skip;
+}
+
 static inline void
 render_lines(int min_line, int max_line)
 {
 	gfx_context.latched = 0;
+
+	// Frame-skip: keep the latch bookkeeping above, but drop the expensive
+	// rasterization + host line conversion. VDC state, IRQs and sprite-0
+	// collision (all in gfx_run) are unaffected, so game logic is intact.
+	if (gfx_skip_render)
+		return;
 
 	uint8_t *screen_buffer = osd_gfx_framebuffer(PCE.VDC.screen_width, PCE.VDC.screen_height);
 	if (!screen_buffer) {

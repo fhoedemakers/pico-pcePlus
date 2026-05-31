@@ -35,6 +35,7 @@ extern "C"
 #include "pce.h"
 #include "psg.h"
 #include "cd.h"
+#include "gfx.h"
 }
 
 bool isFatalError = false;
@@ -48,7 +49,7 @@ static uint32_t fps = 0;
 static uint8_t framesbeforeAutoStateIsLoaded = 0;
 static char fpsString[3] = "00";
 
-#define AUDIOBUFFERSIZE 1024
+#define AUDIOBUFFERSIZE 4096
 #define PCE_AUDIO_RATE 44100
 #define PCE_SAMPLES_PER_FRAME (PCE_AUDIO_RATE / 60)
 
@@ -238,18 +239,50 @@ extern "C" void __not_in_flash_func(osd_gfx_lines_rendered)(int first_line, int 
 #endif
 }
 
+#if PICO_RP2350
 static int16_t cd_audio_buffer[PCE_SAMPLES_PER_FRAME * 2];
+#endif
+
+#if !HSTX && PICO_RP2350
+#if USE_I2S_AUDIO
+extern "C" int audio_i2s_get_fill_permille();
+#endif
+// Fill level (permille, 0..1000) of whichever audio output is currently
+// active — the DVI/HDMI audio ring or the I2S ring. Drives the audio-clock
+// pace and frame-skip so both behave identically regardless of audio route.
+static int __not_in_flash_func(cdAudioFillPermille)()
+{
+#if EXT_AUDIO_IS_ENABLED
+    if (settings.flags.useExtAudio == 1 || Frens::isHeadPhoneJackConnected())
+    {
+#if USE_I2S_AUDIO
+        return audio_i2s_get_fill_permille();
+#else
+        return 500; // other ext-audio drivers expose no fill level
+#endif
+    }
+#endif
+    auto &r = dvi_->getAudioRingBuffer();
+    uint32_t sz = r.getBufferSize();
+    return sz ? (int)((uint64_t)r.getFullReadableSize() * 1000u / sz) : 0;
+}
+#endif
 
 // Per-frame: push audio, clear display borders, render FPS overlay.
 static void __not_in_flash_func(pushAudioAndOverlay)()
 {
+#if PICO_RP2350
     if (CD.cd_attached) {
-        cd_adpcm_update();
+        // CD audio SD prefetch (cd_audio_update):
+        //  - HSTX: core1 background task.
+        //  - framebuffer DVI: during the PaceFrames60fps slack-wait (the
+        //    vsyncWaitTask), overlapping the wait instead of adding frame time.
+        //  - non-framebuffer DVI: no slack-wait, so prefetch here on core0.
 #if !HSTX
-        // PicoDVI: core1 has no spare cycles, so read from SD here on core0.
-        if (CD.audio_status == 0)
+        if (CD.audio_status == 0 && !Frens::isFrameBufferUsed())
             cd_audio_update();
 #endif
+        // CD-DA: generate into a scratch buffer and mix into the PSG output.
         if (CD.audio_status == 0) {
             int n = cd_audio_generate_samples(cd_audio_buffer, PCE_SAMPLES_PER_FRAME);
             for (int i = 0; i < n * 2; i++) {
@@ -257,7 +290,10 @@ static void __not_in_flash_func(pushAudioAndOverlay)()
                 pce_audio_buffer[i] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
             }
         }
+        // ADPCM: decode + resample, summed directly into the PSG output.
+        cd_adpcm_generate_samples(pce_audio_buffer, PCE_SAMPLES_PER_FRAME, PCE_AUDIO_RATE);
     }
+#endif
 
     int audio_idx = 0;
 
@@ -294,23 +330,30 @@ static void __not_in_flash_func(pushAudioAndOverlay)()
 #if EXT_AUDIO_IS_ENABLED
     if (settings.flags.useExtAudio == 1 || Frens::isHeadPhoneJackConnected())
     {
-        for (int a = 0; a < PCE_SAMPLES_PER_FRAME; a++)
+        for (int a = 0; a < audio_pos; a++)
             EXT_AUDIO_ENQUEUE_SAMPLE(pce_audio_buffer[a * 2], pce_audio_buffer[a * 2 + 1]);
-    }
-    else
+    } else {
 #endif
-    {
-        auto &ring = dvi_->getAudioRingBuffer();
-        int avail = std::min<int>(PCE_SAMPLES_PER_FRAME, ring.getWritableSize());
-        if (avail > 0)
+        // Batch push to the DVI audio ring buffer.
+        int remaining = audio_pos;
+        int pos = 0;
+        while (remaining > 0)
         {
+            auto &ring = dvi_->getAudioRingBuffer();
+            auto n = std::min<int>(remaining, ring.getWritableSize());
+            if (!n)
+                break;
             auto p = ring.getWritePointer();
-            for (int a = 0; a < avail; a++)
-                *p++ = {static_cast<short>(pce_audio_buffer[a * 2]),
-                        static_cast<short>(pce_audio_buffer[a * 2 + 1])};
-            ring.advanceWritePointer(avail);
+            for (int a = 0; a < n; a++)
+                *p++ = {pce_audio_buffer[(pos + a) * 2],
+                        pce_audio_buffer[(pos + a) * 2 + 1]};
+            ring.advanceWritePointer(n);
+            remaining -= n;
+            pos += n;
         }
+#if EXT_AUDIO_IS_ENABLED
     }
+#endif
 #if FRAMEBUFFERISPOSSIBLE
     if (Frens::isFrameBufferUsed())
     {
@@ -651,16 +694,58 @@ void readInputAndMapToPCE(DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem, bool
 void __not_in_flash_func(process)(void)
 {
     DWORD pdwPad1, pdwPad2, pdwSystem;
+    bool skipRender = false;
     while (reset == false)
     {
         readInputAndMapToPCE(&pdwPad1, &pdwPad2, &pdwSystem, false, nullptr);
         audio_pos = 0;
         audio_accum = 0;
         audio_scanline_count = 0;
+        gfx_set_skip_render(skipRender);
         pce_run();
         pushAudioAndOverlay();
+#if !HSTX && PICO_RP2350
+        // Audio-clock pacing for CD games on the framebuffer DVI path, for both
+        // HDMI and I2S (the I2S ring is enlarged to 4096 so it has the same
+        // >=2-frame depth the audio-clock lock needs). cdAudioFillPermille()
+        // reports whichever output is active. Disabled only for ext-audio
+        // drivers that expose no fill level.
+        bool cdFb = CD.cd_attached && Frens::isFrameBufferUsed();
+#if EXT_AUDIO_IS_ENABLED && !USE_I2S_AUDIO
+        if (settings.flags.useExtAudio == 1 || Frens::isHeadPhoneJackConnected())
+            cdFb = false; // SPI/other ext audio: no fill query → timer pace
+#endif
+        Frens::setAudioPaceQuery(cdFb ? cdAudioFillPermille : nullptr);
+#endif
         ProcessAfterFrameIsRendered();
+#if PICO_RP2350
+        // Frame-skip for render-bound CD scenes: when the emulator can't hold
+        // 60fps, audio underruns (HDMI drops / I2S crackles). Drop the next
+        // frame's draw so CPU+audio run at full speed while only the picture
+        // stalls. Never skip twice running → >=30fps video.
+        if (CD.cd_attached)
+        {
+#if !HSTX
+            // PicoDVI: audio-ring fill is the authoritative "behind" signal.
+            bool behind = cdFb && cdAudioFillPermille() < 250;
+#else
+            // HSTX: no audio-ring query on core0; use wall-clock overrun.
+            // Trigger at 16200µs (not 16667) so we skip proactively before
+            // the DI queue underruns, rather than reacting after the damage.
+            static uint32_t lastFrameEnd = 0;
+            uint32_t now = time_us_32();
+            bool behind = lastFrameEnd && (now - lastFrameEnd) > 16200;
+            lastFrameEnd = now;
+#endif
+            skipRender = behind && !skipRender;
+        }
+        else
+        {
+            skipRender = false;
+        }
+#endif
     }
+    gfx_set_skip_render(false);
 }
 
 static char selectedRom[FF_MAX_LFN];
@@ -858,18 +943,24 @@ int main()
             }
 
             printf("Starting game\n");
-#if HSTX
             if (isCDGame) {
+#if HSTX
                 extern void video_output_set_background_task(void (*)(void));
                 video_output_set_background_task(cd_audio_update);
-            }
+#else
+                // Framebuffer DVI: prefetch CD audio during the pace slack-wait.
+                if (Frens::isFrameBufferUsed())
+                    Frens::setVSyncWaitTask(cd_audio_update);
 #endif
+            }
             Frens::PaceFrames60fps(true);
             process();
             if (isCDGame) {
 #if HSTX
                 extern void video_output_set_background_task(void (*)(void));
                 video_output_set_background_task(nullptr);
+#else
+                Frens::setVSyncWaitTask(nullptr);
 #endif
                 char bramPath[50];
                 snprintf(bramPath, sizeof(bramPath), SAVESTATEDIR);
