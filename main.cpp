@@ -401,7 +401,10 @@ extern "C" void osd_input_read(uint8_t joypads[8])
 static inline int ProcessAfterFrameIsRendered()
 {
     Frens::pollHeadPhoneJack();
-    Frens::PaceFrames60fps(false);
+    // Pulse-vsync wait for non-CD games (HuCards) on PicoDVI — locks to the
+    // DVI's 60Hz pulse, same as before. CD games override this via the
+    // audio-clock pace registered with setAudioPaceQuery.
+    Frens::PaceFrames60fps(false, !CD.cd_attached);
 #if NES_PIN_CLK != -1
     nespad_read_start();
 #endif
@@ -953,7 +956,7 @@ int main()
                     Frens::setVSyncWaitTask(cd_audio_update);
 #endif
             }
-            Frens::PaceFrames60fps(true);
+            Frens::PaceFrames60fps(true, !isCDGame);
             process();
             if (isCDGame) {
 #if HSTX
