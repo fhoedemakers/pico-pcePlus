@@ -41,7 +41,45 @@ This is part of a family of Raspberry Pi Pico emulator projects:
    - Install a compatible BIOS file (see [CD-ROM BIOS Setup](#cd-rom-bios-setup) below)
    - A board with PSRAM is required
 4. Insert the SD card into the device
-5. Use the menu to browse, select, and play games
+5. Optionally include [metadata files](#using-metadata) for box art and game information
+6. Use the menu to browse, select, and play games
+
+***
+
+## Using Metadata
+
+> [!NOTE]
+> Metadata support will be available in an upcoming release.
+
+The emulator can display box art and game information in the menu when metadata files are present on the SD card. When a ROM is selected in the menu, press **START** to view its metadata. The screensaver will also display random box art when metadata is available.
+
+### Installation
+
+Download the PCE metadata pack from the [releases page](https://github.com/fhoedemakers/pico-pcePlus/releases) and extract its contents to the root of your SD card. The metadata should be placed in the `/metadata/PCE/` folder with the following structure:
+
+```
+SD Card Root
+└── metadata/
+    └── PCE/
+        ├── images/
+        │   └── 160/
+        │       ├── 0/
+        │       │   ├── <CRC32>.444    (DVI boards)
+        │       │   └── <CRC32>.555    (HSTX boards)
+        │       ├── 1/
+        │       ...
+        └── descr/
+            ├── 0/
+            │   └── <CRC32>.txt
+            ├── 1/
+            ...
+```
+
+- **Images** are box art files named by the CRC32 of the ROM, stored as `.444` (for DVI/PicoDVI boards) or `.555` (for HSTX boards).
+- **Descriptions** are text files named by the CRC32 of the ROM, containing game information.
+- Files are organized into subdirectories by the first hex digit of the CRC32 hash (`0`–`f`).
+
+The CRC32 of a loaded ROM is shown in the emulator's on-screen display and can be used to verify which metadata file corresponds to a game.
 
 ***
 
@@ -200,5 +238,7 @@ This project is licensed under the GNU General Public License v3.0. See the [LIC
 
 - [pce-go](https://github.com/ducalex/retro-go) – PC Engine emulation core by ducalex
 - [pico-infonesPlus](https://github.com/fhoedemakers/pico-infonesPlus) – Video/audio framework and shared infrastructure
+- [pico_lib](https://github.com/shuichitakano/pico_lib) – Audio support for PicoDVI by [Shuichi Takano](https://github.com/shuichitakano)
+- [pico_hdmi](https://github.com/fliperama86/pico_hdmi) – HDMI library by [fliperama86](https://github.com/fliperama86)
 - [PicoDVI](https://github.com/Wren6991/PicoDVI) – DVI output library
 - [TinyUSB](https://github.com/hathach/tinyusb) – USB host support
