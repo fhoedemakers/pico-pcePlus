@@ -2,20 +2,24 @@
 
 ## Introduction
 
-**pico-pcePlus** is a PC Engine / TurboGrafx-16 emulator for Raspberry Pi Pico, Pico 2, and other RP2040/RP2350-based microcontrollers. It provides PC Engine emulation with SD card support, an integrated menu system, and HDMI video output, enabling users to build compact, affordable retro gaming systems.
+**pico-pcePlus** is a PC Engine / TurboGrafx-16 emulator for Raspberry Pi Pico 2 and other RP2350-based microcontrollers. It provides PC Engine emulation with SD card support, an integrated menu system, and HDMI video output, enabling users to build compact, affordable retro gaming systems.
+
+> [!IMPORTANT]
+> This emulator requires an **RP2350**-based board. RP2040 boards (original Pico) are not supported.
+> CD-ROM² games additionally require **PSRAM** and a valid **CD-ROM BIOS** file on the SD card.
 
 This project is based on [pce-go](https://github.com/ducalex/retro-go) from retro-go by ducalex, using the video/audio framework from [pico-infonesPlus](https://github.com/fhoedemakers/pico-infonesPlus).
 
 ### Features
 
 - **PC Engine / TurboGrafx-16 Emulation** – Execute HuCard ROM files (`.pce`) directly from an SD card
-- **CD-ROM² Support** – Play CD-ROM² games using CUE/BIN disc images with CD-DA audio and ADPCM playback
+- **CD-ROM² Support** – Play CD-ROM² games using CUE/BIN disc images with CD-DA audio and ADPCM playback (requires PSRAM)
 - **SD Card Menu System** – Browse and launch games from an on-screen menu interface
 - **Dual Controller Support** – Two simultaneous controllers for multiplayer gameplay
 - **Save State Management** – Save and restore game states
 - **Audio** – PSG sound with per-scanline generation, CD-DA audio mixing, and ADPCM decoding
 - **Multiple Display Modes** – DVI (PicoDVI) and HSTX output with configurable screen modes
-- **Flexible Hardware** – Compatible with standard DVI/HDMI breakout boards and various RP2040/RP2350 boards
+- **Flexible Hardware** – Compatible with standard DVI/HDMI breakout boards and various RP2350 boards
 
 ### Project Information
 
@@ -32,31 +36,66 @@ This is part of a family of Raspberry Pi Pico emulator projects:
 
 1. Prepare an SD card formatted as FAT32 or exFAT
 2. Transfer PC Engine ROM files (`.pce`) to the card (subdirectory organization is supported)
-3. For CD-ROM² games, place CUE/BIN disc image files on the SD card
+3. For CD-ROM² games:
+   - Place CUE/BIN disc image files on the SD card
+   - Install a compatible BIOS file (see [CD-ROM BIOS Setup](#cd-rom-bios-setup) below)
+   - A board with PSRAM is required
 4. Insert the SD card into the device
 5. Use the menu to browse, select, and play games
 
 ***
 
+## CD-ROM BIOS Setup
+
+CD-ROM² games require a System Card BIOS to boot. You must provide your own BIOS file — it is not included with the emulator.
+
+### Installation
+
+1. Create a `/bios/` folder in the root of your SD card
+2. Place one or more BIOS files (with `.pce` extension) in the `/bios/` folder
+3. The emulator will automatically scan this folder, identify the BIOS by its CRC32 checksum, and select the best available one
+
+### Supported BIOS Files
+
+The emulator recognizes the following BIOS files by CRC32:
+
+| CRC32 | Description | Priority |
+|--------|-------------|----------|
+| `0x1F240E6E` | Arcade Card Pro (JP) | Highest |
+| `0x8C4588E2` | Arcade Card Duo (JP) | High |
+| `0x6D9A73EF` | Super CD-ROM System (JP, v3.0) | Medium-High |
+| `0x2B5B75FE` | TG-CD Super System Card (US) | Medium-High |
+| `0x51A12D90` | Games Express CD Card (JP) | Medium |
+| `0x9D1E81B8` | Games Express CD Card (JP, Alt) | Medium |
+| `0x283B74E0` | CD-ROM System (JP, v2.1) | Medium-Low |
+| `0x52520BC6` | CD-ROM System (JP, v2.0) | Medium-Low |
+| `0xFF2A5EC3` | TurboGrafx CD System (US, v2.0) | Medium-Low |
+| `0x3F9F95A4` | CD-ROM System (JP, v1.0) | Low |
+
+> [!NOTE]
+> - The **Super CD-ROM System v3.0** or **Arcade Card Pro** BIOS is recommended for maximum game compatibility.
+> - If multiple BIOS files are found, the one with the highest priority is automatically selected.
+> - US-region BIOS files will run the emulator in US/TurboGrafx mode; JP BIOS files run in PC Engine mode.
+> - If the emulator does not recognize your BIOS CRC, it will still attempt to use the file as a fallback, but compatibility may vary.
+> - Without a BIOS file in `/bios/`, CD-ROM² games will fail to load with the message "No BIOS in /bios/".
+
+***
+
 ## Possible Configurations
 
-You can use it with these RP2040/RP2350 boards and configurations:
+You can use it with these RP2350 boards and configurations:
 
-- **Raspberry Pi Pico / Pico 2** with a breadboard setup:
+- **Raspberry Pi Pico 2** with a breadboard setup:
   - [Adafruit DVI Breakout For HDMI Source Devices](https://www.adafruit.com/product/4984)
   - [Adafruit Micro-SD breakout board+](https://www.adafruit.com/product/254)
 
-- **[Adafruit Feather RP2040 with DVI](https://www.adafruit.com/product/5710)** (HDMI Output Port)
+- **[Waveshare RP2350-PiZero Development Board](https://www.waveshare.com/rp2350-pizero.htm)** – Supports optional PSRAM. When installed, CD-ROM² games are supported.
 
-- **[Waveshare RP2040-PiZero Development Board](https://www.waveshare.com/rp2040-pizero.htm)**
+- **[Adafruit Metro RP2350](https://www.adafruit.com/product/6003)** – Supports optional PSRAM. When installed, CD-ROM² games are supported.
 
-- **[Waveshare RP2350-PiZero Development Board](https://www.waveshare.com/rp2350-pizero.htm)** – Supports optional PSRAM
+- **[Pimoroni Pico Plus 2](https://shop.pimoroni.com/products/pimoroni-pico-plus-2?variant=42092668289107)** – Built-in PSRAM, full CD-ROM² support.
 
-- **[Adafruit Metro RP2350](https://www.adafruit.com/product/6003)** – Supports optional PSRAM
-
-- **[Pimoroni Pico Plus 2](https://shop.pimoroni.com/products/pimoroni-pico-plus-2?variant=42092668289107)** – Built-in PSRAM
-
-- **[Adafruit Fruit Jam](https://www.adafruit.com/product/6200)** – No additional hardware required apart from a USB gamepad
+- **[Adafruit Fruit Jam](https://www.adafruit.com/product/6200)** – Built-in PSRAM, no additional hardware required apart from a USB gamepad. Full CD-ROM² support.
 
 For detailed setup instructions, refer to the [pico-infonesPlus documentation](https://github.com/fhoedemakers/pico-infonesPlus#setup) as the hardware configurations are identical.
 
@@ -106,19 +145,16 @@ git checkout pce
 Use the build script to compile the firmware:
 
 ```bash
-# Build for a specific hardware configuration (e.g., config 1 = breadboard with Pico)
-./bld.sh -c 1
-
-# Build for Pico 2 (ARM)
+# Build for Pico 2 (ARM) with a specific hardware configuration
 ./bld.sh -c 1 -2
 
 # Build for Pico 2 (RISC-V)
 ./bld.sh -c 1 -r -t $PICO_SDK_PATH/toolchain/RISCV_RPI_2_0_0_2/bin
 
-# Build for Pico W
-./bld.sh -c 2 -w
+# Build for Pico 2 W
+./bld.sh -c 2 -2 -w
 
-# Build with PIO USB support (RP2350 only)
+# Build with PIO USB support (second USB port for controllers)
 ./bld.sh -c 2 -2 -u
 ```
 
@@ -134,10 +170,8 @@ To build all supported configurations and place UF2 binaries in the `releases` f
 
 | Config | Board |
 |--------|-------|
-| 1 | Breadboard with Pico / Pico 2 |
-| 2 | Breadboard with Pico / Pico 2 (active-low active SD CS) |
-| 3 | Adafruit Feather RP2040 DVI |
-| 4 | Waveshare RP2040-PiZero |
+| 1 | Breadboard with Pico 2 |
+| 2 | Breadboard with Pico 2 (active-low SD CS) |
 | 5 | Adafruit Metro RP2350 |
 | 6 | Waveshare RP2350-PiZero |
 | 7 | Pimoroni Pico Plus 2 (breadboard) |
