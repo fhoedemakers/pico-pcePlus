@@ -406,7 +406,12 @@ static int extract_filename(const char *line, char *out, size_t size)
 
 // Open a BIN file (relative to CD.cue_dir) and return its size via *out_size.
 // Returns 0 on success, -1 on failure. Used only by cd_load_cue's fixup pass.
-static int stat_bin_size(const char *bin_name, FSIZE_t *out_size)
+// Probe a BIN/WAV file: returns its total size, and — for canonical RIFF/WAVE
+// files — the byte offset of the PCM data chunk's payload (so audio reads
+// skip the RIFF/fmt/etc. header bytes instead of playing them as samples).
+// Returns 0 in *out_wav_offset for non-WAV files, leaving callers free to use
+// it as an unconditional bias on bin_offset.
+static int probe_bin_file(const char *bin_name, FSIZE_t *out_size, uint32_t *out_wav_offset)
 {
 	static FIL  s_fil;
 	static char s_path[256];
@@ -416,6 +421,35 @@ static int stat_bin_size(const char *bin_name, FSIZE_t *out_size)
 	if (f_open(&s_fil, s_path, FA_READ) != FR_OK)
 		return -1;
 	*out_size = f_size(&s_fil);
+	if (out_wav_offset) *out_wav_offset = 0;
+
+	// Try to identify a RIFF/WAVE container and walk its chunks to find the
+	// PCM payload. A canonical CD-ripped WAV has a 44-byte header (RIFF+WAVE
+	// + fmt + data), but extra chunks (LIST/INFO, JUNK, PEAK, …) can push
+	// the payload further in. Walk until we find "data" or run out of file.
+	if (out_wav_offset && *out_size >= 12) {
+		uint8_t hdr[12];
+		UINT br = 0;
+		if (f_read(&s_fil, hdr, 12, &br) == FR_OK && br == 12 &&
+		    hdr[0] == 'R' && hdr[1] == 'I' && hdr[2] == 'F' && hdr[3] == 'F' &&
+		    hdr[8] == 'W' && hdr[9] == 'A' && hdr[10] == 'V' && hdr[11] == 'E') {
+			uint32_t pos = 12;
+			for (int i = 0; i < 32 && pos + 8 <= *out_size; i++) {
+				uint8_t ck[8];
+				if (f_lseek(&s_fil, pos) != FR_OK) break;
+				if (f_read(&s_fil, ck, 8, &br) != FR_OK || br != 8) break;
+				uint32_t ck_size = (uint32_t)ck[4] | ((uint32_t)ck[5] << 8) |
+				                   ((uint32_t)ck[6] << 16) | ((uint32_t)ck[7] << 24);
+				if (ck[0] == 'd' && ck[1] == 'a' && ck[2] == 't' && ck[3] == 'a') {
+					*out_wav_offset = pos + 8;
+					break;
+				}
+				// Chunks are word-aligned: pad odd sizes up to even.
+				pos += 8 + ck_size + (ck_size & 1);
+			}
+		}
+	}
+
 	f_close(&s_fil);
 	return 0;
 }
@@ -500,6 +534,23 @@ cd_load_cue(const char *cue_path)
 				continue;
 			}
 			CD.tracks[current_track].file_lba = lba;
+		} else if (strncasecmp(p, "PREGAP", 6) == 0) {
+			// Pregap declared as a directive — no bytes in the BIN for it.
+			// We must still account for the gap in disc-level LBAs so the
+			// emulator's TOC matches what the BIOS expects. Without this,
+			// audio plays seek into the *data* of the next track and lose
+			// the first PREGAP seconds. The other CUE shape (pregap baked
+			// into the BIN via INDEX 00 + INDEX 01) carries the offset in
+			// file_lba and works without this directive.
+			if (current_track < 0) continue;
+			char msf[32] = {0};
+			if (sscanf(p + 6, " %31s", msf) != 1) continue;
+			uint32_t lba;
+			if (parse_msf(msf, &lba) != 0) {
+				printf("cd_load_cue: bad PREGAP MSF: %s\n", msf);
+				continue;
+			}
+			CD.tracks[current_track].pregap_lbas = lba;
 		}
 	}
 	f_close(&cue);
@@ -519,8 +570,13 @@ cd_load_cue(const char *cue_path)
 
 	// --- Fixup pass ---
 	// Compute lba_start / lba_end / bin_offset for each track:
-	//   - lba_start: running cumulative disc LBA
-	//   - bin_offset: byte offset of track within its OWN BIN file
+	//   - lba_start: running cumulative disc LBA, including pregap_lbas
+	//     (PREGAP directive) and file_lba (pregap-in-BIN form). A given
+	//     CUE uses only one form per track; the other is zero.
+	//   - bin_offset: byte offset of track within its OWN BIN file:
+	//     file_lba contributes (PREGAP directives reserve disc LBAs but
+	//     consume no bytes in the BIN), plus a RIFF/WAVE header bias for
+	//     .wav audio so playback skips header bytes instead of clicking.
 	//   - lba_end:
 	//       * if next track shares this BIN: lba_end = lba_start + delta(file_lba)
 	//       * otherwise (last track in its BIN): derive length from BIN size
@@ -529,8 +585,15 @@ cd_load_cue(const char *cue_path)
 		cd_track_t *t = &CD.tracks[i];
 		uint32_t raw = t->sector_size ? CD_RAW_SECTOR_SIZE : CD_SECTOR_SIZE;
 
-		t->lba_start  = running_lba + t->file_lba;
-		t->bin_offset = (uint64_t)t->file_lba * raw;
+		// Probe every track's BIN so we can bias bin_offset past any WAV
+		// header. Also gives us the file size, used below to derive the
+		// length for the last track in each BIN.
+		FSIZE_t bin_size = 0;
+		uint32_t wav_off = 0;
+		bool have_bin = (probe_bin_file(t->bin_name, &bin_size, &wav_off) == 0);
+
+		t->lba_start  = running_lba + t->pregap_lbas + t->file_lba;
+		t->bin_offset = (uint64_t)wav_off + (uint64_t)t->file_lba * raw;
 
 		uint32_t length_lbas = 0;
 		const bool same_bin_next =
@@ -541,15 +604,11 @@ cd_load_cue(const char *cue_path)
 			uint32_t next_fl = CD.tracks[i + 1].file_lba;
 			if (next_fl >= t->file_lba)
 				length_lbas = next_fl - t->file_lba;
+		} else if (have_bin && bin_size > t->bin_offset) {
+			length_lbas = (uint32_t)((bin_size - t->bin_offset) / raw);
 		} else {
-			FSIZE_t bin_size = 0;
-			if (stat_bin_size(t->bin_name, &bin_size) == 0 &&
-			    bin_size > t->bin_offset) {
-				length_lbas = (uint32_t)((bin_size - t->bin_offset) / raw);
-			} else {
-				printf("cd_load_cue: cannot stat BIN %s%s\n",
-				       CD.cue_dir, t->bin_name);
-			}
+			printf("cd_load_cue: cannot probe BIN %s%s\n",
+			       CD.cue_dir, t->bin_name);
 		}
 
 		t->lba_end  = t->lba_start + length_lbas;
@@ -564,12 +623,13 @@ cd_load_cue(const char *cue_path)
 	       (unsigned long)((uint64_t)CD.total_lba * CD_RAW_SECTOR_SIZE / (1024 * 1024)));
 	for (int i = 0; i < CD.num_tracks; i++) {
 		const cd_track_t *t = &CD.tracks[i];
-		printf("  T%02u %s lba=[%6lu..%6lu) flba=%6lu off=%9llu  %s\n",
+		printf("  T%02u %s lba=[%6lu..%6lu) flba=%6lu pre=%4lu off=%9llu  %s\n",
 		       t->track_no,
 		       t->type ? "DATA " : "AUDIO",
 		       (unsigned long)t->lba_start,
 		       (unsigned long)t->lba_end,
 		       (unsigned long)t->file_lba,
+		       (unsigned long)t->pregap_lbas,
 		       (unsigned long long)t->bin_offset,
 		       t->bin_name);
 	}

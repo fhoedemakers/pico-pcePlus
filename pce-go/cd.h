@@ -24,6 +24,10 @@ typedef struct {
 	uint32_t lba_end;       // Disc-level LBA where this track ends (exclusive)
 	uint64_t bin_offset;    // Byte offset within bin_name where lba_start sits
 	uint32_t file_lba;      // LBA within this track's BIN file (INDEX 01)
+	uint32_t pregap_lbas;   // Pregap sectors NOT present in the BIN (CUE
+	                        // PREGAP directive). When pregap audio is baked
+	                        // into the BIN (INDEX 00 + INDEX 01 form), this
+	                        // is 0 and file_lba carries the offset instead.
 	uint8_t  type;          // 0 = audio, 1 = data
 	uint8_t  sector_size;   // 0 = 2048, 1 = 2352
 	uint8_t  track_no;      // 1-based track number
