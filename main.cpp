@@ -56,6 +56,10 @@ static char fpsString[3] = "00";
 #define EMULATOR_CLOCKFREQ_KHZ 252000
 static uint32_t CPUFreqKHz = EMULATOR_CLOCKFREQ_KHZ;
 
+#ifndef CHECK_BIOS_AT_BOOT
+#define CHECK_BIOS_AT_BOOT 0
+#endif
+
 // Per-scanline indexed line buffer: pce-go renders one scanline at a time.
 // 16-byte scratch padding on each side (see render_lines() in gfx.c).
 static uint8_t pce_line_buffer_storage[XBUF_WIDTH + 64];
@@ -793,6 +797,7 @@ int main()
     // into core1's SCRATCH region with deep call chains here (DIR + FILINFO
     // + multiple FF_MAX_LFN buffers + cd_find_bios's own static-now buffers
     // is fine, but stack-allocating here on top is not).
+#if CHECK_BIOS_AT_BOOT
     if (!isFatalError && Frens::isPsramEnabled())
     {
         printf("--- CD BIOS self-test ---\n");
@@ -836,7 +841,7 @@ int main()
             printf("--------------------------------------\n");
         }
     }
-
+#endif
     buildPaletteLUT();
 
     bool showSplash = true;
