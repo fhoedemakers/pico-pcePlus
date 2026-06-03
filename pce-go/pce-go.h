@@ -107,3 +107,8 @@ extern void osd_gfx_lines_rendered(int first_line, int last_line);
 extern void osd_input_read(uint8_t joypads[8]);
 extern void osd_vsync(void);
 extern void osd_psg_scanline(void);
+// Sample-accurate PSG: called from pce_writeIO before applying a PSG register
+// write, with the current frame-relative CPU cycle position. Lets the host
+// generate audio up to that exact point so transient register changes (short
+// SFX, DDA) are captured at their real timing instead of once per scanline batch.
+extern void osd_psg_sync(int frame_cycle);

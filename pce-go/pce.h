@@ -108,16 +108,17 @@ typedef struct {
 	uint8_t pad0, pad1;
 
 	uint8_t wave_data[32];
-	uint8_t dda_data[256];
+	// NOTE: the first 40 bytes (header + wave_data) are the savestate window
+	// (SVAR_N(PCE.PSG.chan[N], 40) in pce-go.c). Fields below are transient and
+	// must stay AFTER offset 40 so save format is unchanged.
 
-	uint32_t dda_count;
-	uint32_t dda_index;
+	uint8_t dda_value;          // DDA sample-and-hold value (0..31), Mesen2 model
 
 	uint32_t wave_accum;
 
-	int32_t noise_accum;
+	int32_t noise_accum;        // 16.16 fixed PSG-clock accumulator for the LFSR
 	int32_t noise_level;
-	int32_t noise_rand;
+	int32_t noise_rand;         // 18-bit LFSR state
 } psg_chan_t;
 
 typedef struct {

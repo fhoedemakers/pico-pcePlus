@@ -47,6 +47,11 @@ pce_reset(bool hard)
 	for (int i = 0; i < PSG_CHANNELS; i++) {
 		PCE.PSG.chan[i].control = 0x80;
 	}
+	// Seed the noise LFSRs (ch 4/5). A zero LFSR is a stuck state (XOR of
+	// zeros stays zero) → silent noise, so it must be non-zero after the
+	// PSG memset above. Mesen2 inits the 18-bit LFSR to 1.
+	PCE.PSG.chan[4].noise_rand = 1;
+	PCE.PSG.chan[5].noise_rand = 1;
 
 	// Reset memory banking
 	pce_bank_set(7, 0x00);
@@ -607,6 +612,12 @@ void __not_in_flash_func(pce_writeIO)(uint16_t A, uint8_t V)
 		break;
 
 	case 0x0800:                /* PSG */
+		// Sample-accurate audio: generate PSG output up to the current CPU
+		// cycle BEFORE applying this register write, so the previous register
+		// state is rendered for exactly the cycles it was active (mirrors
+		// Mesen2's PcePsg::Run() before each write). frame_cycle is monotonic
+		// within a frame: Scanline * cycles_per_line + cycles consumed so far.
+		osd_psg_sync(PCE.Scanline * PCE.Timer.cycles_per_line + PCE.Cycles);
 		switch (A & 15) {
 		case 0:                                 // Select PSG channel
 			PCE.PSG.ch = MIN(V & 7, 5);
@@ -638,10 +649,12 @@ void __not_in_flash_func(pce_writeIO)(uint16_t A, uint8_t V)
 
 		case 6:                                 // Put a value into the waveform or direct audio buffers
 			if (PCE.PSG.chan[PCE.PSG.ch].control & PSG_DDA_ENABLE) {
-				// DDA mode: buffer sample for playback
-				PCE.PSG.chan[PCE.PSG.ch].dda_data[PCE.PSG.chan[PCE.PSG.ch].dda_index] = V & 0x1F;
-				PCE.PSG.chan[PCE.PSG.ch].dda_count = MIN(PCE.PSG.chan[PCE.PSG.ch].dda_count+1, 0x100);
-				PCE.PSG.chan[PCE.PSG.ch].dda_index = (PCE.PSG.chan[PCE.PSG.ch].dda_index+1) & 0xFF;
+				// DDA mode: sample-and-hold the single output value (Mesen2
+				// model). Sample-accurate sync (osd_psg_sync, called above)
+				// renders the held value for exactly the cycles between writes,
+				// so the high-rate DDA stream reproduces correctly without a
+				// FIFO. The old buffered model mistimed playback (clicks).
+				PCE.PSG.chan[PCE.PSG.ch].dda_value = V & 0x1F;
 			} else {
 				// Wave mode: write to the wave buffer
 				PCE.PSG.chan[PCE.PSG.ch].wave_data[PCE.PSG.chan[PCE.PSG.ch].wave_index] = V & 0x1F;

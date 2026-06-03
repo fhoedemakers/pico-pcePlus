@@ -6,7 +6,9 @@
 #include "pce.h"
 #include "psg.h"
 
-static const uint8_t vol_tbl[32] = {
+// Legacy logarithmic amplitude table. No longer used now that DDA shares the
+// wave/noise linear volume path; kept for reference (see plan Phase 4).
+static const uint8_t __attribute__((unused)) vol_tbl[32] = {
 	100 >> 8, 451 >> 8, 508 >> 8, 573 >> 8, 646 >> 8, 728 >> 8, 821 >> 8, 925 >> 8,
 	1043 >> 8, 1175 >> 8, 1325 >> 8, 1493 >> 8, 1683 >> 8, 1898 >> 8, 2139 >> 8, 2411 >> 8,
 	2718 >> 8, 3064 >> 8, 3454 >> 8, 3893 >> 8, 4388 >> 8, 4947 >> 8, 5576 >> 8, 6285 >> 8,
@@ -40,73 +42,49 @@ static void __not_in_flash_func(psg_update_chan)(sample_t *buf, int ch, size_t d
 		lvol = (lvol + rvol) / 2;
 	}
 
-	// This isn't very accurate, we don't track how long each DA sample should play
-	// but we call psg_update() often enough (10x per frame) that guessing should be good enough...
-	if (chan->dda_count) {
-		// Cycles per frame: 119318
-		// Samples per frame: 368
-
-		// Cycles per scanline: 454
-		// Samples per scanline: ~1.4
-
-		// One sample = 324 cycles
-
-		// const int cycles_per_sample = CYCLES_PER_FRAME / (host.sound.sample_freq / 60);
-
-		// float repeat = (float)elapsed / cycles_per_sample / chan->dda_count;
-		// MESSAGE_INFO("%.2f\n", repeat);
-
-		int start = (int)chan->dda_index - chan->dda_count;
-		if (start < 0)
-			start += 0x100;
-
-		int repeat = 3; // MIN(2, (dwSize / 2) / chan->dda_count) + 1;
-
-		lvol = vol_tbl[lvol << 1];
-		rvol = vol_tbl[rvol << 1];
-
-		int step = stereo ? 2 : 1;
-		while (buf + step <= buf_end && (chan->dda_count || chan->control & PSG_DDA_ENABLE)) {
-			if (chan->dda_count) {
-				if ((sample = (chan->dda_data[(start++) & 0xFF] - 16)) >= 0)
-					sample++;
-				chan->dda_count--;
-			}
-
-			for (int i = 0; i < repeat && buf + step <= buf_end; i++) {
-				*buf++ = (sample * lvol);
-
-				if (stereo) {
-					*buf++ = (sample * rvol);
-				}
-			}
-		}
-	}
-
 	/*
-	* Do nothing if there is no audio to be played on this channel.
+	* Channel priority when enabled (Mesen2 PcePsgChannel): DDA > Noise > Wave.
+	* When disabled, the channel is silent — the final memset zero-fills buf.
+	* Synthesis is driven at the output sample rate; sample accuracy comes from
+	* osd_psg_sync segmenting these calls at each register write.
 	*/
 	if (!(chan->control & PSG_CHAN_ENABLE)) {
 		chan->wave_accum = 0;
 	}
 	/*
-	* PSG Noise generation (it has priority over DDA and WAVE)
+	* DDA: sample-and-hold the single value last written to reg 6. Centered
+	* like the wave path (value - 16, with the +1 deadband for >=0).
+	*/
+	else if (chan->control & PSG_DDA_ENABLE) {
+		if ((sample = ((int)chan->dda_value - 16)) >= 0)
+			sample++;
+		while (buf < buf_end) {
+			*buf++ = (sample * lvol);
+			if (stereo)
+				*buf++ = (sample * rvol);
+		}
+	}
+	/*
+	* Noise generation (ch 4/5 only). Real PCE 18-bit LFSR (taps 0,1,11,12,17)
+	* clocked at master/period, period = (freq==0x1F)?32:((~freq)&0x1F)*64 in
+	* PSG clocks. Advanced via a 16.16 fixed accumulator of PSG-clocks-per-
+	* output-sample.
 	*/
 	else if ((ch == 4 || ch == 5) && (chan->noise_ctrl & PSG_NOISE_ENABLE)) {
-		int Np = (chan->noise_ctrl & 0x1F);
+		uint32_t freq = chan->noise_ctrl & 0x1F;
+		uint32_t period = (freq == 0x1F) ? 32u : (((~freq) & 0x1F) * 64u);
+		uint32_t clk_per_sample = (uint32_t)(((uint64_t)CLOCK_PSG << 16) / (uint32_t)samplerate);
+		uint32_t period_fp = period << 16;
 
 		while (buf < buf_end) {
-			chan->noise_accum += 3000 + Np * 512;
-
-			if ((Tp = (chan->noise_accum / samplerate)) >= 1) {
-				if (chan->noise_rand & 0x00080000) {
-					chan->noise_rand = ((chan->noise_rand ^ 0x0004) << 1) + 1;
-					chan->noise_level = -15;
-				} else {
-					chan->noise_rand <<= 1;
-					chan->noise_level = 15;
-				}
-				chan->noise_accum -= samplerate * Tp;
+			chan->noise_accum += (int32_t)clk_per_sample;
+			while ((uint32_t)chan->noise_accum >= period_fp) {
+				chan->noise_accum -= (int32_t)period_fp;
+				uint32_t v = (uint32_t)chan->noise_rand;
+				uint32_t bit = ((v >> 0) ^ (v >> 1) ^ (v >> 11)
+				              ^ (v >> 12) ^ (v >> 17)) & 0x01;
+				chan->noise_level = (v & 0x01) ? 15 : -16;
+				chan->noise_rand = (int32_t)((v >> 1) | (bit << 17));
 			}
 
 			*buf++ = (chan->noise_level * lvol);
@@ -115,12 +93,6 @@ static void __not_in_flash_func(psg_update_chan)(sample_t *buf, int ch, size_t d
 				*buf++ = (chan->noise_level * rvol);
 			}
 		}
-	}
-	/*
-	* There is 'direct access' audio to be played.
-	*/
-	else if (chan->control & PSG_DDA_ENABLE) {
-
 	}
 	/*
 	* PSG Wave generation.
@@ -174,8 +146,10 @@ static void __not_in_flash_func(psg_update_chan)(sample_t *buf, int ch, size_t d
 int
 psg_init(int _samplerate, bool _stereo)
 {
-	PCE.PSG.chan[4].noise_rand = 0x51F63101;
-	PCE.PSG.chan[5].noise_rand = 0x1F631042;
+	// Seed the noise LFSRs non-zero (Mesen2 uses 1). The 18-bit LFSR is a
+	// stuck-at-zero state if seeded with 0, producing silent noise.
+	PCE.PSG.chan[4].noise_rand = 1;
+	PCE.PSG.chan[5].noise_rand = 1;
 
 	samplerate = _samplerate;
 	stereo = _stereo;

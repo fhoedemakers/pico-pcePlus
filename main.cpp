@@ -144,26 +144,38 @@ static void buildPaletteLUT()
 }
 
 static int16_t pce_audio_buffer[PCE_SAMPLES_PER_FRAME * 2]; // stereo interleaved
-static int audio_pos = 0;
-static int audio_accum = 0;
-static int audio_scanline_count = 0;
+static int audio_pos = 0;   // PSG samples synthesised so far this frame (0..735)
 
 #define AUDIO_SAMPLES_PER_SCANLINE 4
-#define PSG_BATCH_SCANLINES 44
 
-extern "C" void __not_in_flash_func(osd_psg_scanline)(void)
+// pce-go internal cycles per frame: 263 scanlines * cycles_per_line (113).
+#define PCE_CYCLES_PER_FRAME (263 * 113)
+
+// Sample-accurate PSG: generate audio up to the frame-relative CPU cycle
+// position of the register write that triggered this (called from pce_writeIO
+// before the write is applied). Each register state is thus rendered for
+// exactly the cycles it was active — short SFX / DDA are no longer lost to
+// coarse per-batch sampling. The frame always completes to 735 samples via the
+// frame-end flush in osd_psg_scanline, so the downstream consumers are unchanged.
+extern "C" void __not_in_flash_func(osd_psg_sync)(int frame_cycle)
 {
-    audio_accum += PCE_AUDIO_RATE;
-    audio_scanline_count++;
-    if (audio_scanline_count < PSG_BATCH_SCANLINES && PCE.Scanline < 262)
-        return;
-    audio_scanline_count = 0;
-    int n = audio_accum / (60 * 263);
-    audio_accum -= n * (60 * 263);
-    if (n > 0 && audio_pos + n <= PCE_SAMPLES_PER_FRAME) {
+    int target = (int)((uint64_t)frame_cycle * PCE_SAMPLES_PER_FRAME / PCE_CYCLES_PER_FRAME);
+    if (target > PCE_SAMPLES_PER_FRAME)
+        target = PCE_SAMPLES_PER_FRAME;
+    int n = target - audio_pos;
+    if (n > 0) {
         psg_update(pce_audio_buffer + audio_pos * 2, n, 0x3F);
         audio_pos += n;
     }
+}
+
+extern "C" void __not_in_flash_func(osd_psg_scanline)(void)
+{
+    // Frame-end flush: ensure the whole frame's 735 samples are synthesised
+    // even if the game wrote no PSG registers late in the frame. Sample-accurate
+    // generation otherwise happens on demand in osd_psg_sync at each write.
+    if (PCE.Scanline >= 262)
+        osd_psg_sync(PCE_CYCLES_PER_FRAME);
 }
 
 extern "C" void __not_in_flash_func(osd_gfx_lines_rendered)(int first_line, int last_line)
@@ -702,8 +714,6 @@ void __not_in_flash_func(process)(void)
     {
         readInputAndMapToPCE(&pdwPad1, &pdwPad2, &pdwSystem, false, nullptr);
         audio_pos = 0;
-        audio_accum = 0;
-        audio_scanline_count = 0;
         gfx_set_skip_render(skipRender);
         pce_run();
         pushAudioAndOverlay();
