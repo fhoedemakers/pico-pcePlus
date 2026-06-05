@@ -57,7 +57,11 @@ static char fpsString[3] = "00";
 static uint32_t CPUFreqKHz = EMULATOR_CLOCKFREQ_KHZ;
 
 #ifndef CHECK_BIOS_AT_BOOT
-#define CHECK_BIOS_AT_BOOT 0
+#define CHECK_BIOS_AT_BOOT 1
+#endif
+
+#if ENABLE_CHD
+extern "C" void cd_chd_diag_run(void);
 #endif
 
 // Per-scanline indexed line buffer: pce-go renders one scanline at a time.
@@ -852,6 +856,17 @@ int main()
             }
             printf("--------------------------------------\n");
         }
+    }
+#endif
+
+#if ENABLE_CHD
+    // CHD feasibility-spike timing harness. Tries every .chd file in /diag/
+    // and reports per-hunk decompression latency + sustained MB/s. Lives
+    // outside the CHECK_BIOS_AT_BOOT gate above since the spike is the
+    // whole point of this build — we want timing even when the BIOS
+    // self-test isn't running.
+    if (!isFatalError && Frens::isPsramEnabled()) {
+        cd_chd_diag_run();
     }
 #endif
     buildPaletteLUT();

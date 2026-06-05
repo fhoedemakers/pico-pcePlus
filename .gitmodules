@@ -7,3 +7,6 @@
 [submodule "pico_lib"]
 	path = pico_lib
 	url = https://github.com/fhoedemakers/pico_lib.git
+[submodule "external/libchdr"]
+	path = external/libchdr
+	url = https://github.com/rtissera/libchdr.git

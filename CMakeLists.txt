@@ -88,7 +88,28 @@ endif()
 
 project(${projectname} C CXX ASM)
 
+if(NOT DEFINED ENABLE_CHD)
+    set(ENABLE_CHD 1)
+endif()
+
 pico_sdk_init()
+
+# Replace the SDK's pico_malloc INTERFACE source (rp2_common/pico_malloc/
+# malloc.c — a tiny mutex + OOM-panic wrapper) with our PSRAM-routing
+# implementation. The SDK already calls pico_wrap_function on
+# malloc/calloc/realloc/free, so the wraps are wired; we just need our
+# __wrap_* symbols to be the ones the linker picks. By overriding
+# INTERFACE_SOURCES the SDK's file is dropped from picopcePlus's compile
+# inputs, leaving only our cd_chd_alloc_wrap.cpp.
+#
+# Required because libchdr's chd_open allocates ~hundreds of KB (per-hunk
+# map + zlib/LZMA/zstd state) which the 264 KB SRAM heap can't satisfy;
+# PSRAM has 5+ MB free.
+if(ENABLE_CHD)
+    set_property(TARGET pico_malloc PROPERTY INTERFACE_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/cd_chd_alloc_wrap.cpp
+    )
+endif()
 
 # check_and_add_pico_pio_usb_support() needs pico_generate_pio_header which is
 # only available after pico_sdk_init().  The first call inside family.cmake
@@ -115,6 +136,7 @@ add_executable(${projectname}
     EmuOverlay444.c
     EmuOverlay555.c
     state.cpp
+    cd_chd_diag.cpp
 )
 
 pico_set_program_name(${projectname} "${projectname}")
@@ -275,6 +297,16 @@ target_link_libraries(${projectname} PRIVATE
     pico_shared
     xinput_host
 )
+
+# Optional CHD support (feasibility spike). The pre-empted pico_malloc above
+# (when ENABLE_CHD=1) routes stdlib malloc through PSRAM, which is required
+# for libchdr's chd_open allocations. Links libchdr_pico and exposes
+# ENABLE_CHD to source files.
+if(ENABLE_CHD)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/external/libchdr_pico.cmake)
+    target_link_libraries(${projectname} PRIVATE libchdr_pico)
+    target_compile_definitions(${projectname} PRIVATE ENABLE_CHD=1)
+endif()
 
 if(PICO_BOARD STREQUAL "pico_w" OR PICO_BOARD STREQUAL "pico2_w")
     target_link_libraries(${projectname} PRIVATE pico_cyw43_arch_none)
