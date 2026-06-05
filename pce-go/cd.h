@@ -195,10 +195,14 @@ bool cd_adpcm_generate_samples(int16_t *out, int num_samples, int host_rate);
 int  cd_bram_save(const char *path);
 int  cd_bram_load(const char *path);
 
-// BIOS discovery: scans /bios/ for .pce files, CRCs each, picks best match.
-// On success: writes path into out_path (size bytes), sets *out_variant and
+// BIOS discovery: scans primary_dir (when non-NULL/non-empty) first and falls
+// back to /bios/ on miss. primary_dir is a directory path WITH a trailing '/'
+// (e.g. "/games/rondo/"). Per directory: CRCs each .pce file, prefers the
+// highest-priority known BIOS, falls back to the first unknown .pce. On
+// success: writes path into out_path (size bytes), sets *out_variant and
 // CD.bios_is_us, returns 0. On failure returns -1.
-int  cd_find_bios(char *out_path, size_t size, bios_variant_t *out_variant);
+int  cd_find_bios(char *out_path, size_t size, const char *primary_dir,
+                  bios_variant_t *out_variant);
 
 // True if the currently loaded BIOS is the US TG-CD variant (affects joypad
 // region bit). Returns false when no CD game is loaded.

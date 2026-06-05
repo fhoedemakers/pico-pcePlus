@@ -261,8 +261,9 @@ static void unload_disc_state(void)
  * Load a CD-ROM game.
  *
  * Steps:
- *   1. Locate a BIOS in /bios/ via cd_find_bios() (CRC-matched, picks the
- *      most capable variant).
+ *   1. Locate a BIOS via cd_find_bios(): checks the CUE's own folder first
+ *      (per-game override), then /bios/. CRC-matched, picks the most capable
+ *      variant within the chosen folder.
  *   2. Load the BIOS into PSRAM and map it to hardware pages 0x00-0x1F.
  *   3. Allocate CD-ROM RAM, Super System Card RAM, ADPCM RAM, Arcade Card
  *      RAM and the BRAM page in PSRAM.
@@ -286,10 +287,23 @@ LoadDisc(const char *cue_path)
 	// Static for stack safety (FF_MAX_LFN+8 buffer + ~600 B FIL would push
 	// into core1's SCRATCH region under the 3 KB stack).
 	static char bios_path[FF_MAX_LFN + 8];
+	static char cue_dir[FF_MAX_LFN + 8];
 	static FIL  fil;
 	bios_variant_t variant = BIOS_UNKNOWN;
-	if (cd_find_bios(bios_path, sizeof(bios_path), &variant) != 0) {
-		MESSAGE_ERROR("No CD BIOS found in /bios/\n");
+
+	// Derive the CUE's directory (with trailing '/') so cd_find_bios can
+	// check it before /bios/. Keeps the trailing slash so snprintf("%s%s")
+	// builds correct child paths.
+	strncpy(cue_dir, cue_path, sizeof(cue_dir) - 1);
+	cue_dir[sizeof(cue_dir) - 1] = '\0';
+	{
+		char *slash = strrchr(cue_dir, '/');
+		if (slash) slash[1] = '\0'; else cue_dir[0] = '\0';
+	}
+
+	if (cd_find_bios(bios_path, sizeof(bios_path), cue_dir, &variant) != 0) {
+		MESSAGE_ERROR("No CD BIOS found in %s or /bios/\n",
+		              cue_dir[0] ? cue_dir : "(CUE dir)");
 		return -1;
 	}
 

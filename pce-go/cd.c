@@ -255,28 +255,42 @@ static uint32_t crc32_of_file(const char *path)
 	return crc;
 }
 
-int
-cd_find_bios(char *out_path, size_t size, bios_variant_t *out_variant)
+// Scan a single directory for .pce files and pick the best BIOS in it. dir_in
+// is a path WITH trailing '/' (so we can snprintf "%s%s" against fname). On
+// success writes path into out_path and updates CD.bios_variant/is_us; returns
+// 0. Returns -1 if the dir cannot be opened or contains no .pce files.
+//
+// All FatFS-heavy locals are static: a DIR is ~570 B and a FILINFO is ~278 B
+// on this FatFS configuration (FF_MAX_LFN=255), and several FF_MAX_LFN-sized
+// path buffers compound the problem. With PICO_STACK_SIZE=3072 the deep call
+// chain from main would otherwise overflow into core1's SCRATCH region.
+// cd_find_bios is single-threaded and only runs at boot / on disc load.
+static int scan_bios_dir(const char *dir_in,
+                         char *out_path, size_t out_size,
+                         bios_variant_t *out_variant)
 {
-	if (!out_path || size < 32)
-		return -1;
-
-	// All FatFS-heavy locals are static: a DIR is ~570 B and a FILINFO is
-	// ~278 B on this FatFS configuration (FF_MAX_LFN=255), and several
-	// FF_MAX_LFN-sized path buffers compound the problem. With
-	// PICO_STACK_SIZE=3072 the deep call chain from main would otherwise
-	// overflow into core1's SCRATCH region and cause a delayed hardfault.
-	// cd_find_bios is single-threaded and only runs at boot / on disc load.
 	static DIR     dir;
 	static FILINFO fno;
 	static char    best_path[FF_MAX_LFN + 8];
 	static char    fallback_path[FF_MAX_LFN + 8];
 	static char    full[FF_MAX_LFN + 8];
+	static char    open_path[FF_MAX_LFN + 8];
 
 	best_path[0] = fallback_path[0] = '\0';
 
-	if (f_opendir(&dir, "/bios") != FR_OK) {
-		printf("cd_find_bios: /bios directory not found\n");
+	// f_opendir wants a path WITHOUT a trailing slash (except for root).
+	size_t L = strlen(dir_in);
+	if (L == 0) return -1;
+	strncpy(open_path, dir_in, sizeof(open_path) - 1);
+	open_path[sizeof(open_path) - 1] = '\0';
+	size_t n = strlen(open_path);
+	if (n > 1 && open_path[n - 1] == '/') open_path[n - 1] = '\0';
+
+	printf("cd_find_bios: scanning %s for BIOS files\n", open_path);
+
+	if (f_opendir(&dir, open_path) != FR_OK) {
+		printf("cd_find_bios: %s does not exist or cannot be opened\n",
+		       open_path);
 		return -1;
 	}
 
@@ -284,6 +298,7 @@ cd_find_bios(char *out_path, size_t size, bios_variant_t *out_variant)
 	uint32_t best_crc = 0;
 	const bios_entry_t *best_entry = NULL;
 	uint32_t fallback_crc = 0;
+	int candidates = 0;
 
 	while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0]) {
 		if (fno.fattrib & (AM_DIR | AM_HID))
@@ -291,7 +306,8 @@ cd_find_bios(char *out_path, size_t size, bios_variant_t *out_variant)
 		if (!has_pce_extension(fno.fname))
 			continue;
 
-		snprintf(full, sizeof(full), "/bios/%s", fno.fname);
+		candidates++;
+		snprintf(full, sizeof(full), "%s%s", dir_in, fno.fname);
 
 		uint32_t crc = crc32_of_file(full);
 		const bios_entry_t *e = lookup_bios(crc);
@@ -319,8 +335,8 @@ cd_find_bios(char *out_path, size_t size, bios_variant_t *out_variant)
 	f_closedir(&dir);
 
 	if (best_entry) {
-		strncpy(out_path, best_path, size - 1);
-		out_path[size - 1] = '\0';
+		strncpy(out_path, best_path, out_size - 1);
+		out_path[out_size - 1] = '\0';
 		if (out_variant) *out_variant = best_entry->variant;
 		CD.bios_variant = best_entry->variant;
 		CD.bios_is_us = best_entry->is_us;
@@ -331,18 +347,49 @@ cd_find_bios(char *out_path, size_t size, bios_variant_t *out_variant)
 	}
 
 	if (fallback_path[0]) {
-		strncpy(out_path, fallback_path, size - 1);
-		out_path[size - 1] = '\0';
+		strncpy(out_path, fallback_path, out_size - 1);
+		out_path[out_size - 1] = '\0';
 		if (out_variant) *out_variant = BIOS_UNKNOWN;
 		CD.bios_variant = BIOS_UNKNOWN;
 		CD.bios_is_us = false;
-		printf("cd_find_bios: no known BIOS, falling back to %s "
+		printf("cd_find_bios: no known BIOS in %s, falling back to %s "
 		       "(CRC=0x%08lX, assuming System Card 3.0 / JP)\n",
-		       fallback_path, (unsigned long)fallback_crc);
+		       open_path, fallback_path, (unsigned long)fallback_crc);
 		return 0;
 	}
 
-	printf("cd_find_bios: no .pce files found in /bios/\n");
+	printf("cd_find_bios: no .pce files found in %s (%d entries scanned)\n",
+	       open_path, candidates);
+	return -1;
+}
+
+int
+cd_find_bios(char *out_path, size_t size, const char *primary_dir,
+             bios_variant_t *out_variant)
+{
+	if (!out_path || size < 32)
+		return -1;
+
+	// Per-game override: if the CUE's own folder contains a BIOS, use it
+	// (lets users ship a region-specific BIOS alongside a patched game
+	// without touching /bios/). Falls through to /bios/ when the primary
+	// dir has no .pce files at all.
+	if (primary_dir && primary_dir[0]) {
+		printf("cd_find_bios: trying CUE folder %s first\n", primary_dir);
+		if (scan_bios_dir(primary_dir, out_path, size, out_variant) == 0) {
+			printf("cd_find_bios: using BIOS from CUE folder (skipping /bios/)\n");
+			return 0;
+		}
+		printf("cd_find_bios: no BIOS in %s, falling back to /bios/\n",
+		       primary_dir);
+	} else {
+		printf("cd_find_bios: no CUE folder provided, scanning /bios/ only\n");
+	}
+
+	if (scan_bios_dir("/bios/", out_path, size, out_variant) == 0)
+		return 0;
+
+	printf("cd_find_bios: FAILED — no usable BIOS in CUE folder or /bios/\n");
 	if (out_variant) *out_variant = BIOS_UNKNOWN;
 	return -1;
 }
