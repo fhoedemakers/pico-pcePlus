@@ -815,7 +815,7 @@ int main()
         printf("--- CD BIOS self-test ---\n");
         static char     biosPath[FF_MAX_LFN + 8];
         bios_variant_t  variant = BIOS_UNKNOWN;
-        if (cd_find_bios(biosPath, sizeof(biosPath), &variant) == 0) {
+        if (cd_find_bios(biosPath, sizeof(biosPath), NULL, &variant) == 0) {
             printf("Found CD BIOS: %s (region=%s)\n",
                    biosPath, cd_bios_is_us() ? "US" : "JP");
         } else {
