@@ -76,6 +76,10 @@ void ResetPCE(bool);
 void RunPCE(void);
 void ShutdownPCE();
 int InitPCE(int samplerate, bool stereo);
+// SuperGrafx mode: must be set BEFORE InitPCE so the emulator can allocate the
+// second VRAM and expand work RAM to 32 KB. Pass true for .sgx ROMs, false
+// otherwise. The PCE/CD path is unchanged when this is false.
+void SetSgxModePCE(bool is_sgx);
 int LoadCard(uint8_t *data, size_t size);
 int LoadFile(const char *name);
 // Load a PC Engine CD-ROM game. Scans /bios/ for a System Card / Arcade Card

@@ -99,6 +99,18 @@ typedef union {
 } UWord;
 
 typedef struct {
+	UWord regs[32];          /* value of each VDC register */
+	size_t reg;              /* currently selected VDC register */
+	uint8_t status;          /* current VCD status (end of line, end of screen, ...) */
+	uint8_t vram;            /* VRAM DMA transfer status to happen in vblank */
+	uint8_t satb;            /* DMA transfer status to happen in vblank */
+	uint8_t mode_chg;        /* Video mode change needed at next frame */
+	uint32_t pending_irqs;   /* Pending VDC IRQs (we use it as a stack of 4bit events) */
+	uint32_t screen_width;   /* Effective resolution updated by mode_chg */
+	uint32_t screen_height;  /* Effective resolution updated by mode_chg */
+} vdc_t;
+
+typedef struct {
 	uint8_t freq_lsb;   // 2
 	uint8_t freq_msb;   // 3
 	uint8_t control;    // 4
@@ -200,17 +212,39 @@ typedef struct {
 	} VCE;
 
 	// Video Display Controller
+	vdc_t VDC;
+
+	// SuperGrafx: second Video Display Controller (mirror of VDC above).
+	// Only populated when VPC.is_sgx is true; otherwise zero and unused.
+	vdc_t VDC2;
+
+	// SuperGrafx: second 64 KB VRAM (allocated only when VPC.is_sgx).
+	uint16_t *VRAM2; // [0x8000]
+
+	// SuperGrafx: second sprite attribute table.
+	sprite_t SPRAM2[64];
+
+	// SuperGrafx: Video Priority Controller. Mirrors Mesen2's PceVpcState.
+	// Registers occupy $1FE008–$1FE00F in SGX mode:
+	//   $08 Priority1 / $09 Priority2  (per-window VDC1/VDC2 enable + mode)
+	//   $0A-$0B Window1 X (10-bit) / $0C-$0D Window2 X
+	//   $0E ST   (bit 0: route writes through $00-$03 to VDC2)
+	// VDC2 registers also appear at $10-$17 mirroring VDC1's $00-$07.
 	struct {
-		UWord regs[32];			/* value of each VDC register */
-		size_t reg;				/* currently selected VDC register */
-		uint8_t status;			/* current VCD status (end of line, end of screen, ...) */
-		uint8_t vram;			/* VRAM DMA transfer status to happen in vblank */
-		uint8_t satb;			/* DMA transfer status to happen in vblank */
-		uint8_t mode_chg;       /* Video mode change needed at next frame */
-		uint32_t pending_irqs;	/* Pending VDC IRQs (we use it as a stack of 4bit events) */
-		uint32_t screen_width;	/* Effective resolution updated by mode_chg */
-		uint32_t screen_height;	/* Effective resolution updated by mode_chg */
-	} VDC;
+		uint8_t is_sgx;          /* 1 if running a SuperGrafx ROM */
+		uint8_t priority1;
+		uint8_t priority2;
+		uint8_t st_to_vdc2;      /* ST register bit 0 */
+		uint16_t window1;        /* 10-bit X coordinate */
+		uint16_t window2;
+		/* Derived per-window priority config (recomputed on priority1/2 writes).
+		 * Index: 0=NoWindow, 1=Window1, 2=Window2, 3=Both.
+		 * Each entry packs: bit0=Vdc1Enabled, bit1=Vdc2Enabled, bits2-3=PriorityMode. */
+		uint8_t window_cfg[4];
+		uint8_t has_irq_vdc1;
+		uint8_t has_irq_vdc2;
+		int scroll_y_diff_vdc2; /* PCE.ScrollYDiff counterpart for VDC2 */
+	} VPC;
 
 	// Programmable Sound Generator
 	struct {

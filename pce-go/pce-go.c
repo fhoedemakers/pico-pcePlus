@@ -385,6 +385,18 @@ ResetPCE(bool hard)
 
 
 /**
+ * Select SuperGrafx mode for the next InitPCE() call. Stored in PCE.VPC.is_sgx
+ * which lives in BSS, so writing before InitPCE() is safe — pce_init() reads
+ * it to decide whether to allocate VRAM2 and grow work RAM to 32 KB.
+ */
+void
+SetSgxModePCE(bool is_sgx)
+{
+	PCE.VPC.is_sgx = is_sgx ? 1 : 0;
+}
+
+
+/**
  * Initialize the emulator (allocate memory, call osd_init* functions)
  */
 int

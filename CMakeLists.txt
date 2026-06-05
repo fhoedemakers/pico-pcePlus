@@ -44,7 +44,7 @@ message("* Current build type is : ${CMAKE_BUILD_TYPE}")
 # Hardware / board selection (project-specific)
 # ---------------------------------------------------------------------------
 if(NOT HW_CONFIG)
-    set(HW_CONFIG 1 CACHE STRING "Select the hardware configuration for your board")
+    set(HW_CONFIG 14 CACHE STRING "Select the hardware configuration for your board")
 endif()
 
 if(NOT USE_HSTX)
@@ -204,6 +204,7 @@ target_compile_definitions(${projectname} PRIVATE
     DOUBLEFRAMEBUFFER=0
     DI_RING_BUFFER_SIZE=512
     USE_PCE_FRAMEBUFFER_PACING=1
+    SGX=1
     #HSTX_DEBUG=1
 )
 

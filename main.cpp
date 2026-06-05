@@ -773,8 +773,20 @@ int main()
     ErrorMessage[0] = selectedRom[0] = 0;
 
     int fileSize = 0;
+    vreg_voltage voltage = VREG_VOLTAGE_1_20;
+#if SGX
+    Frens::FlashParams *flashParams;
+    // assign flashParams to point to flash location
 
-    Frens::setClocksAndStartStdio(CPUFreqKHz, VREG_VOLTAGE_1_20);
+    bool freqOverruled = false;
+    flashParams = (Frens::FlashParams *)FLASHPARAM_ADDRESS;
+    if ( Frens::validateFlashParams(*flashParams) ) {
+        CPUFreqKHz = flashParams->cpuFreqKHz;
+        voltage = flashParams->voltage;
+        freqOverruled = true;
+    }
+#endif
+    Frens::setClocksAndStartStdio(CPUFreqKHz, voltage);
 
     printf("==========================================================================================\n");
     printf("Pico-PCE+ %s\n", SWVERSION);
@@ -853,20 +865,31 @@ int main()
         if (strlen(selectedRom) == 0 || reset == true)
         {
             // CD-ROM games (.cue) require PSRAM for the additional ~2.6MB of
-            // CD/SCD/ADPCM/Arcade Card buffers, so hide them on non-PSRAM boards.
-            const char *menuExts = Frens::isPsramEnabled() ? ".pce .cue" : ".pce";
+            // CD/SCD/ADPCM/Arcade Card buffers.
+            // SuperGrafx (.sgx) needs an extra 64 KB VRAM2 that doesn't fit in
+            // the SRAM heap alongside the 150 KB framebuffer; we route it to
+            // PSRAM and therefore require PSRAM for .sgx as well. Most SGX
+            // carts are 1 MB anyway, which already needs PSRAM to hold the ROM.
+            const char *menuExts;
+#if PICO_RP2350
+            menuExts = Frens::isPsramEnabled() ? ".pce .cue .sgx" : ".pce";
+#else
+            menuExts = ".pce";
+#endif
             menu("Pico-PCE+", ErrorMessage, isFatalError, showSplash, menuExts, selectedRom);
             printf("Selected rom from menu: %s\n", selectedRom);
         }
         reset = false;
         fileSize = 0;
 
-        // Detect CD-ROM vs HuCard by file extension.
+        // Detect CD-ROM / SuperGrafx / HuCard by file extension.
         bool isCDGame = false;
+        bool isSgxGame = false;
         if (strlen(selectedRom) > 0) {
             char ext[8];
             Frens::getextensionfromfilename(selectedRom, ext, sizeof(ext));
-            isCDGame = (strcasecmp(ext, ".cue") == 0);
+            isCDGame  = (strcasecmp(ext, ".cue") == 0);
+            isSgxGame = (strcasecmp(ext, ".sgx") == 0);
         }
 
         if (isCDGame)
@@ -930,6 +953,7 @@ int main()
         do
         {
             reset = resetGame = false;
+            SetSgxModePCE(isSgxGame);
             InitPCE(PCE_AUDIO_RATE, true);
             int loadResult;
             if (isCDGame) {

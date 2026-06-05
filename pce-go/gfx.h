@@ -8,6 +8,8 @@ void gfx_term(void);
 void gfx_irq(int type);
 void gfx_reset(bool hard);
 void gfx_latch_context(int force);
+void gfx_latch_context_vdc2(int force);
+void gfx_bind_vdc1(void);
 
 // Frame-skip: when set, render_lines() skips rasterization and the host
 // line callback for the current frame (CPU/VDC/IRQ/collision logic still

@@ -8,6 +8,15 @@
 #include "gfx.h"
 #include "cd.h"
 
+// PSRAM-aware allocator. VRAM2 is too large to keep in the SRAM heap alongside
+// the 150 KB framebuffer + everything else (causes OOM). We tried putting it in
+// a static SRAM array; that consumed enough BSS to leave the sbrk heap with too
+// little room for the transient FATFS/USB/libc allocations PCE games depend on.
+// PSRAM is the only place left — VDC2 rendering pays a latency cost (~slower
+// per-pixel fetches) but the game runs.
+extern void *frens_f_malloc(size_t size);
+extern void  frens_f_free(void *ptr);
+
 // Global struct containing our emulated hardware status
 PCE_t PCE;
 
@@ -28,16 +37,35 @@ pce_reset(bool hard)
 	memset(&PCE.PSG, 0, sizeof(PCE.PSG));
 	memset(&PCE.Timer, 0, sizeof(PCE.Timer));
 
+	if (PCE.VPC.is_sgx) {
+		memset(&PCE.VDC2, 0, sizeof(PCE.VDC2));
+		// Keep VPC.is_sgx (set before InitPCE); clear the rest.
+		uint8_t was_sgx = PCE.VPC.is_sgx;
+		memset(&PCE.VPC, 0, sizeof(PCE.VPC));
+		PCE.VPC.is_sgx = was_sgx;
+	}
+
 	if (hard) {
-		memset(PCE.RAM, 0, 0x2000);
+		memset(PCE.RAM, 0, PCE.VPC.is_sgx ? 0x8000 : 0x2000);
 		memset(PCE.VRAM, 0, 0x10000);
+		if (PCE.VPC.is_sgx && PCE.VRAM2) {
+			memset(PCE.VRAM2, 0, 0x10000);
+		}
 		memset(PCE.SPRAM, 0, 512);
+		if (PCE.VPC.is_sgx) {
+			memset(PCE.SPRAM2, 0, 512);
+		}
 		memset(PCE.Palette, 0, 512);
 		memset(PCE.NULLRAM, 0xFF, 0x2000);
 	}
 
 	IO_VDC_REG[VPR].B.h = 0x0f;
 	IO_VDC_REG[VPR].B.l = 0x02;
+
+	if (PCE.VPC.is_sgx) {
+		PCE.VDC2.regs[VPR].B.h = 0x0f;
+		PCE.VDC2.regs[VPR].B.l = 0x02;
+	}
 
 	PCE.SF2 = 0;
 	PCE.Timer.cycles_per_line = 113;
@@ -77,17 +105,27 @@ pce_reset(bool hard)
 int
 pce_init(void)
 {
-	PCE.RAM = malloc(0x2000);
+	// Work RAM: 8 KB on PC Engine, 32 KB on SuperGrafx (mapped at banks F8-FB).
+	size_t ram_size = PCE.VPC.is_sgx ? 0x8000 : 0x2000;
+	PCE.RAM = malloc(ram_size);
 	PCE.VRAM = malloc(0x10000);
+	if (PCE.VPC.is_sgx) {
+		PCE.VRAM2 = frens_f_malloc(0x10000);
+	}
 	PCE.NULLRAM = malloc(0x2000);
 	PCE.IOAREA = PCE.NULLRAM + 4;
 	PCE.MemoryMapR = calloc(256, sizeof(uint8_t *));
 	PCE.MemoryMapW = calloc(256, sizeof(uint8_t *));
 
-	if (!PCE.RAM || !PCE.VRAM || !PCE.NULLRAM || !PCE.MemoryMapR || !PCE.MemoryMapW) {
+	if (!PCE.RAM || !PCE.VRAM || !PCE.NULLRAM || !PCE.MemoryMapR || !PCE.MemoryMapW
+		|| (PCE.VPC.is_sgx && !PCE.VRAM2)) {
 		pce_term();
 		return -1;
 	}
+
+	// VRAM/SPRAM/VDC.regs storage now exists — point gfx.c's VDC1 context
+	// at it. (gfx_init() runs before pce_init() in InitPCE so it can't bind.)
+	gfx_bind_vdc1();
 
 	for (int i = 0; i < 0xFF; i++) {
 		PCE.MemoryMapR[i] = PCE.NULLRAM;
@@ -96,6 +134,17 @@ pce_init(void)
 
 	PCE.MemoryMapR[0xF8] = PCE.RAM;
 	PCE.MemoryMapW[0xF8] = PCE.RAM;
+	if (PCE.VPC.is_sgx) {
+		// SuperGrafx: banks F9-FB extend WRAM to a full 32 KB. The page-set
+		// macros add a per-page offset, so MemoryMap[V] must point at the
+		// BASE of each 8 KB window.
+		PCE.MemoryMapR[0xF9] = PCE.RAM + 0x2000;
+		PCE.MemoryMapW[0xF9] = PCE.RAM + 0x2000;
+		PCE.MemoryMapR[0xFA] = PCE.RAM + 0x4000;
+		PCE.MemoryMapW[0xFA] = PCE.RAM + 0x4000;
+		PCE.MemoryMapR[0xFB] = PCE.RAM + 0x6000;
+		PCE.MemoryMapW[0xFB] = PCE.RAM + 0x6000;
+	}
 	PCE.MemoryMapR[0xFF] = PCE.IOAREA;
 	PCE.MemoryMapW[0xFF] = PCE.IOAREA;
 
@@ -122,12 +171,16 @@ pce_term(void)
 	PCE.RAM = NULL;
 	free(PCE.VRAM);
 	PCE.VRAM = NULL;
+	if (PCE.VRAM2) {
+		frens_f_free(PCE.VRAM2);
+		PCE.VRAM2 = NULL;
+	}
+	free(PCE.NULLRAM);
+	PCE.NULLRAM = NULL;
 	free(PCE.ExRAM);
 	PCE.ExRAM = NULL;
 	free(PCE.ROM);
 	PCE.ROM = NULL;
-	free(PCE.NULLRAM);
-	PCE.NULLRAM = NULL;
 	free(PCE.MemoryMapR);
 	PCE.MemoryMapR = NULL;
 	free(PCE.MemoryMapW);
@@ -210,6 +263,211 @@ cart_write(uint16_t A, uint8_t V)
 }
 
 
+// --- Per-VDC port helpers ---------------------------------------------------
+// One handler shared by PCE (always VDC1) and SuperGrafx (VDC1 or VDC2 via the
+// VPC ST register). Behavior for VDC1 must remain bit-identical to the original
+// inline switch — verify with the .pce regression set after touching either.
+// is_primary == 1 for VDC1 (drives PCE.ScrollYDiff + gfx_latch_context, which
+// are still VDC1-only at this stage). For VDC2 we skip those side effects;
+// step 6 introduces a VDC2-side latch/scroll-diff.
+
+#define VR(R)        (vdc->regs[R])
+#define VR_ACTIVE    (vdc->regs[vdc->reg])
+#define VR_INC(reg)  do { unsigned _i[] = {1,32,64,128}; vdc->regs[(reg)].W += _i[(vdc->regs[CR].W >> 11) & 3]; } while (0)
+#define VR_MINLINE   (VR(VPR).B.h + VR(VPR).B.l)
+
+static inline uint8_t __not_in_flash_func(vdc_io_read)(vdc_t *vdc, uint16_t *vram, uint8_t port)
+{
+	switch (port) {
+	case 0: {
+		uint8_t ret = vdc->status;
+		vdc->status = 0;
+		return ret;
+	}
+	case 1:
+		return 0;
+	case 2:
+		if (vdc->reg == VRR) {
+			return vram[VR(MARR).W & 0x7FFF] & 0xFF;
+		}
+		return VR_ACTIVE.B.l;
+	case 3:
+		if (vdc->reg == VRR) {
+			uint8_t ret = vram[VR(MARR).W & 0x7FFF] >> 8;
+			VR_INC(MARR);
+			return ret;
+		}
+		return VR_ACTIVE.B.h;
+	}
+	return 0xFF;
+}
+
+static inline void __not_in_flash_func(vdc_io_write)(vdc_t *vdc, uint16_t *vram, uint8_t port, uint8_t V, int is_primary)
+{
+	switch (port) {
+	case 0: // Latch
+		vdc->reg = V & 31;
+		return;
+
+	case 1: // Not used
+		return;
+
+	case 2: // VDC data (LSB)
+		switch (vdc->reg & 31) {
+		case MAWR: case MARR: case VWR: case vdc3: case vdc4:
+		case RCR: case MWR:
+		case DCR: case SOUR: case DISTR: case LENR: case SATB:
+			break;
+
+		case CR:
+			if (VR_ACTIVE.B.l != V) {
+				if (is_primary) gfx_latch_context(0);
+				else            gfx_latch_context_vdc2(0);
+			}
+			break;
+
+		case BXR:
+			if (VR_ACTIVE.B.l != V) {
+				if (is_primary) gfx_latch_context(0);
+				else            gfx_latch_context_vdc2(0);
+			}
+			break;
+
+		case BYR:
+			if (is_primary) {
+				gfx_latch_context(0);
+				PCE.ScrollYDiff = PCE.Scanline - 1 - VR_MINLINE;
+			} else {
+				gfx_latch_context_vdc2(0);
+				PCE.VPC.scroll_y_diff_vdc2 = PCE.Scanline - 1 - VR_MINLINE;
+			}
+			break;
+
+		case HSR:
+			V = 0x1F;
+			vdc->mode_chg = 1;
+			break;
+
+		case HDR:
+			V &= 0x7F;
+			vdc->mode_chg = 1;
+			break;
+
+		case VPR:
+			V &= 0x1F;
+			vdc->mode_chg = 1;
+			break;
+
+		case VDW: case VCR:
+			vdc->mode_chg = 1;
+			break;
+		}
+		VR_ACTIVE.B.l = V;
+		return;
+
+	case 3: // VDC data (MSB)
+		switch (vdc->reg & 31) {
+		case MAWR: case MARR: case vdc3: case vdc4: case MWR:
+		case DCR: case SOUR: case DISTR:
+			break;
+
+		case VWR:
+			if (VR(MAWR).W < 0x8000) {
+				vram[VR(MAWR).W] = (V << 8) | VR_ACTIVE.B.l;
+			}
+			VR_INC(MAWR);
+			break;
+
+		case CR:
+			if (VR_ACTIVE.B.h != V) {
+				if (is_primary) gfx_latch_context(0);
+				else            gfx_latch_context_vdc2(0);
+			}
+			break;
+
+		case RCR:
+			V &= 0x3;
+			break;
+
+		case BXR:
+			V &= 0x3;
+			if (VR_ACTIVE.B.h != V) {
+				if (is_primary) gfx_latch_context(0);
+				else            gfx_latch_context_vdc2(0);
+			}
+			break;
+
+		case BYR:
+			if (is_primary) gfx_latch_context(0);
+			else            gfx_latch_context_vdc2(0);
+			V &= 0x1;
+			if (is_primary) {
+				PCE.ScrollYDiff = PCE.Scanline - 1 - VR_MINLINE;
+				if (PCE.ScrollYDiff < 0) {
+					MESSAGE_DEBUG("PCE.ScrollYDiff went negative when substraction VPR.h/.l (%d,%d)\n",
+						VR(VPR).B.h, VR(VPR).B.l);
+				}
+			} else {
+				PCE.VPC.scroll_y_diff_vdc2 = PCE.Scanline - 1 - VR_MINLINE;
+			}
+			break;
+
+		case HSR:
+			V &= 0x7F;
+			vdc->mode_chg = 1;
+			break;
+
+		case HDR:
+			V &= 0x7F;
+			break;
+
+		case VPR:
+			V &= 0x7F;
+			vdc->mode_chg = 1;
+			break;
+
+		case VDW:
+			V &= 0x1;
+			vdc->mode_chg = 1;
+			break;
+
+		case VCR:
+			vdc->mode_chg = 1;
+			return; // not interested in the MSB of VCR
+
+		case LENR:
+			VR(LENR).B.h = V;
+			{
+				int src_inc = (VR(DCR).W & 8) ? -1 : 1;
+				int dst_inc = (VR(DCR).W & 4) ? -1 : 1;
+				while (VR(LENR).W != 0xFFFF) {
+					if (VR(DISTR).W < 0x8000) {
+						vram[VR(DISTR).W] = vram[VR(SOUR).W];
+					}
+					VR(SOUR).W  += src_inc;
+					VR(DISTR).W += dst_inc;
+					VR(LENR).W  -= 1;
+				}
+			}
+			if (is_primary) {
+				gfx_irq(VDC_STAT_DV);
+			} else {
+				// VDC2 DV IRQ — push to its own stack, then drain via gfx_irq.
+				PCE.VDC2.pending_irqs <<= 4;
+				PCE.VDC2.pending_irqs |= VDC_STAT_DV & 0xF;
+				gfx_irq(-1);
+			}
+			return;
+
+		case SATB:
+			vdc->satb = DMA_TRANSFER_PENDING;
+			break;
+		}
+		VR_ACTIVE.B.h = V;
+		return;
+	}
+}
+
 uint8_t __not_in_flash_func(pce_readIO)(uint16_t A)
 {
 	// Arcade Card bank $40-$43 memory-mapped read
@@ -226,31 +484,33 @@ uint8_t __not_in_flash_func(pce_readIO)(uint16_t A)
 		ret = PCE.io_buffer;
 
 	switch (A & 0x1F00) {
-	case 0x0000:                /* VDC */
-		switch (A & 3) {
-		case 0:
-			ret = PCE.VDC.status;
-			PCE.VDC.status = 0;
-			break;
-		case 1:
-			ret = 0;
-			break;
-		case 2:
-			if (PCE.VDC.reg == VRR) {             // // VRAM Read Register (LSB)
-				ret = PCE.VRAM[IO_VDC_REG[MARR].W & 0x7FFF] & 0xFF;
+	case 0x0000:                /* VDC / VPC (SuperGrafx) */
+		if (PCE.VPC.is_sgx) {
+			uint8_t port = A & 0x1F;
+			if (port < 4) {
+				vdc_t *vdc = PCE.VPC.st_to_vdc2 ? &PCE.VDC2 : &PCE.VDC;
+				uint16_t *vram = PCE.VPC.st_to_vdc2 ? PCE.VRAM2 : PCE.VRAM;
+				ret = vdc_io_read(vdc, vram, port);
+			} else if (port >= 0x10 && port <= 0x13) {
+				ret = vdc_io_read(&PCE.VDC2, PCE.VRAM2, port & 3);
+			} else if (port == 0x08) {
+				ret = PCE.VPC.priority1;
+			} else if (port == 0x09) {
+				ret = PCE.VPC.priority2;
+			} else if (port == 0x0A) {
+				ret = PCE.VPC.window1 & 0xFF;
+			} else if (port == 0x0B) {
+				ret = (PCE.VPC.window1 >> 8) & 0x03;
+			} else if (port == 0x0C) {
+				ret = PCE.VPC.window2 & 0xFF;
+			} else if (port == 0x0D) {
+				ret = (PCE.VPC.window2 >> 8) & 0x03;
 			} else {
-				ret = IO_VDC_REG_ACTIVE.B.l;
-			}
-			break;
-		case 3:
-			if (PCE.VDC.reg == VRR) {            // VRAM Read Register (MSB)
-				ret = PCE.VRAM[IO_VDC_REG[MARR].W & 0x7FFF] >> 8;
-				IO_VDC_REG_INC(MARR);
-			} else {
-				ret = IO_VDC_REG_ACTIVE.B.h;
+				ret = 0;
 			}
 			break;
 		}
+		ret = vdc_io_read(&PCE.VDC, PCE.VRAM, A & 3);
 		break;
 
 	case 0x0400:                /* VCE */
@@ -359,204 +619,40 @@ void __not_in_flash_func(pce_writeIO)(uint16_t A, uint8_t V)
 		PCE.io_buffer = V;
 
 	switch (A & 0x1F00) {
-	case 0x0000:                /* VDC */
-		switch (A & 3) {
-		case 0: // Latch
-			PCE.VDC.reg = V & 31;
-			return;
-
-		case 1: // Not used
-			return;
-
-		case 2: // VDC data (LSB)
-			switch (PCE.VDC.reg & 31) {
-			case MAWR:                          // Memory Address Write Register
-				break;
-
-			case MARR:                          // Memory Address Read Register
-				break;
-
-			case VWR:                           // VRAM Write Register
-				break;
-
-			case vdc3:                          // Unused
-				break;
-
-			case vdc4:                          // Unused
-				break;
-
-			case CR:                            // Control Register
-				if (IO_VDC_REG_ACTIVE.B.l != V)
-					gfx_latch_context(0);
-				break;
-
-			case RCR:                           // Raster Compare Register
-				break;
-
-			case BXR:
-				if (IO_VDC_REG_ACTIVE.B.l != V)
-					gfx_latch_context(0);
-				break;
-
-			case BYR:                           // Vertical screen offset
-				/*
-					if (IO_VDC_REG[BYR].B.l == V)
-					return;
-					*/
-				gfx_latch_context(0);
-				PCE.ScrollYDiff = PCE.Scanline - 1 - IO_VDC_MINLINE;
-				break;
-
-			case MWR:                           // Memory Width Register
-				break;
-
-			case HSR:
-				V = 0x1F;
-				PCE.VDC.mode_chg = 1;
-				break;
-
-			case HDR:                           // Horizontal Definition
-				V &= 0x7F;
-				PCE.VDC.mode_chg = 1;
-				break;
-
-			case VPR:
-				V &= 0x1F;
-				PCE.VDC.mode_chg = 1;
-				break;
-			case VDW:
-			case VCR:
-				PCE.VDC.mode_chg = 1;
-				break;
-
-			case DCR:                           // DMA Control
-				break;
-
-			case SOUR:                          // DMA source address
-				break;
-
-			case DISTR:                         // DMA destination address
-				break;
-
-			case LENR:                          // DMA transfer from VRAM to VRAM
-				break;
-
-			case SATB:                          // DMA from VRAM to SATB
-				break;
+	case 0x0000:                /* VDC / VPC (SuperGrafx) */
+		if (PCE.VPC.is_sgx) {
+			uint8_t port = A & 0x1F;
+			if (port < 4) {
+				vdc_t *vdc = PCE.VPC.st_to_vdc2 ? &PCE.VDC2 : &PCE.VDC;
+				uint16_t *vram = PCE.VPC.st_to_vdc2 ? PCE.VRAM2 : PCE.VRAM;
+				vdc_io_write(vdc, vram, port, V, !PCE.VPC.st_to_vdc2);
+			} else if (port >= 0x10 && port <= 0x13) {
+				vdc_io_write(&PCE.VDC2, PCE.VRAM2, port & 3, V, 0);
+			} else if (port == 0x08) {
+				// Priority1: low nib = Both window, high nib = Window2
+				PCE.VPC.priority1 = V;
+				PCE.VPC.window_cfg[3] = V & 0x0F;        // Both
+				PCE.VPC.window_cfg[2] = (V >> 4) & 0x0F; // Window2
+			} else if (port == 0x09) {
+				// Priority2: low nib = Window1, high nib = NoWindow
+				PCE.VPC.priority2 = V;
+				PCE.VPC.window_cfg[1] = V & 0x0F;        // Window1
+				PCE.VPC.window_cfg[0] = (V >> 4) & 0x0F; // NoWindow
+			} else if (port == 0x0A) {
+				PCE.VPC.window1 = (PCE.VPC.window1 & 0x300) | V;
+			} else if (port == 0x0B) {
+				PCE.VPC.window1 = (PCE.VPC.window1 & 0xFF) | ((V & 0x03) << 8);
+			} else if (port == 0x0C) {
+				PCE.VPC.window2 = (PCE.VPC.window2 & 0x300) | V;
+			} else if (port == 0x0D) {
+				PCE.VPC.window2 = (PCE.VPC.window2 & 0xFF) | ((V & 0x03) << 8);
+			} else if (port == 0x0E) {
+				PCE.VPC.st_to_vdc2 = V & 0x01;
 			}
-			IO_VDC_REG_ACTIVE.B.l = V;
-			TRACE_GFX("VDC[%02x].l=0x%02x\n", PCE.VDC.reg, V);
-			return;
-
-		case 3: // VDC data (MSB)
-			switch (PCE.VDC.reg & 31) {
-			case MAWR:                          // Memory Address Write Register
-				break;
-
-			case MARR:                          // Memory Address Read Register
-				break;
-
-			case VWR:                           // VRAM Write Register
-				// I am not 100% sure if MAWR should wrap instead, eg IO_VDC_REG[MAWR].W & 0x7FFF
-				if (IO_VDC_REG[MAWR].W < 0x8000) {
-					PCE.VRAM[IO_VDC_REG[MAWR].W] = (V << 8) | IO_VDC_REG_ACTIVE.B.l;
-				}
-				IO_VDC_REG_INC(MAWR);
-				break;
-
-			case vdc3:                          // Unused
-				break;
-
-			case vdc4:                          // Unused
-				break;
-
-			case CR:                            // Control Register
-				if (IO_VDC_REG_ACTIVE.B.h != V)
-					gfx_latch_context(0);
-				break;
-
-			case RCR:                           // Raster Compare Register
-				V &= 0x3;
-				break;
-
-			case BXR:                           // Horizontal screen offset
-				V &= 0x3;
-				if (IO_VDC_REG_ACTIVE.B.h != V) {
-					gfx_latch_context(0);
-				}
-				break;
-
-			case BYR:                           // Vertical screen offset
-				gfx_latch_context(0);
-				V &= 0x1;
-				PCE.ScrollYDiff = PCE.Scanline - 1 - IO_VDC_MINLINE;
-				if (PCE.ScrollYDiff < 0) {
-					MESSAGE_DEBUG("PCE.ScrollYDiff went negative when substraction VPR.h/.l (%d,%d)\n",
-						IO_VDC_REG[VPR].B.h, IO_VDC_REG[VPR].B.l);
-				}
-				break;
-
-			case MWR:                           // Memory Width Register
-				break;
-
-			case HSR:
-				V &= 0x7F;
-				PCE.VDC.mode_chg = 1;
-				break;
-
-			case HDR:                           // Horizontal Definition
-				V &= 0x7F;
-				TRACE_GFX("VDC[HDR].h = %d\n", V);
-				break;
-
-			case VPR:
-				V &= 0x7F;
-				PCE.VDC.mode_chg = 1;
-				break;
-			case VDW:
-				V &= 0x1;
-				PCE.VDC.mode_chg = 1;
-				break;
-			case VCR:
-				PCE.VDC.mode_chg = 1;
-				return;//not interested in the MSB of VCR
-
-			case DCR:                           // DMA Control
-				break;
-
-			case SOUR:                          // DMA source address
-				break;
-
-			case DISTR:                         // DMA destination address
-				break;
-
-			case LENR:                          // DMA transfer from VRAM to VRAM
-				IO_VDC_REG[LENR].B.h = V;
-
-				int src_inc = (IO_VDC_REG[DCR].W & 8) ? -1 : 1;
-				int dst_inc = (IO_VDC_REG[DCR].W & 4) ? -1 : 1;
-
-				while (IO_VDC_REG[LENR].W != 0xFFFF) {
-					if (IO_VDC_REG[DISTR].W < 0x8000) {
-						PCE.VRAM[IO_VDC_REG[DISTR].W] = PCE.VRAM[IO_VDC_REG[SOUR].W];
-					}
-					IO_VDC_REG[SOUR].W += src_inc;
-					IO_VDC_REG[DISTR].W += dst_inc;
-					IO_VDC_REG[LENR].W -= 1;
-				}
-
-				gfx_irq(VDC_STAT_DV);
-				return;
-
-			case SATB:                          // DMA from VRAM to SATB
-				PCE.VDC.satb = DMA_TRANSFER_PENDING;
-				break;
-			}
-			IO_VDC_REG_ACTIVE.B.h = V;
-			TRACE_GFX("VDC[%02x].h=0x%02x\n", PCE.VDC.reg, V);
 			return;
 		}
-		break;
+		vdc_io_write(&PCE.VDC, PCE.VRAM, A & 3, V, 1);
+		return;
 
 	case 0x0400:                /* VCE */
 		switch (A & 7) {
