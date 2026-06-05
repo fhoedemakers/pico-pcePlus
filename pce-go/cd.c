@@ -592,7 +592,19 @@ cd_load_cue(const char *cue_path)
 		uint32_t wav_off = 0;
 		bool have_bin = (probe_bin_file(t->bin_name, &bin_size, &wav_off) == 0);
 
-		t->lba_start  = running_lba + t->pregap_lbas + t->file_lba;
+		// In a single-BIN multi-track CUE, running_lba already covers the
+		// previous track's bytes (we built it via lba_end = lba_start +
+		// (next.file_lba - this.file_lba)), so running_lba already equals
+		// this track's file_lba — adding file_lba again would double-count
+		// and push every subsequent track further out of place. Only the
+		// FIRST track in a new BIN file gets a file_lba contribution (the
+		// position within that newly-opened file).
+		const bool same_bin_prev =
+			(i > 0) &&
+			(strcmp(t->bin_name, CD.tracks[i - 1].bin_name) == 0);
+
+		t->lba_start  = running_lba + t->pregap_lbas
+		              + (same_bin_prev ? 0 : t->file_lba);
 		t->bin_offset = (uint64_t)wav_off + (uint64_t)t->file_lba * raw;
 
 		uint32_t length_lbas = 0;
