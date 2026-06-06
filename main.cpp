@@ -35,8 +35,13 @@ extern "C"
 #include "pce.h"
 #include "psg.h"
 #include "cd.h"
+#include "cd_chd.h"
 #include "gfx.h"
 }
+
+#if HSTX
+#include "drivers/pico_hdmi/hstx.h"
+#endif
 
 bool isFatalError = false;
 static FATFS fs;
@@ -60,9 +65,6 @@ static uint32_t CPUFreqKHz = EMULATOR_CLOCKFREQ_KHZ;
 #define CHECK_BIOS_AT_BOOT 1
 #endif
 
-#if ENABLE_CHD
-extern "C" void cd_chd_diag_run(void);
-#endif
 
 // Per-scanline indexed line buffer: pce-go renders one scanline at a time.
 // 16-byte scratch padding on each side (see render_lines() in gfx.c).
@@ -859,16 +861,6 @@ int main()
     }
 #endif
 
-#if ENABLE_CHD
-    // CHD feasibility-spike timing harness. Tries every .chd file in /diag/
-    // and reports per-hunk decompression latency + sustained MB/s. Lives
-    // outside the CHECK_BIOS_AT_BOOT gate above since the spike is the
-    // whole point of this build — we want timing even when the BIOS
-    // self-test isn't running.
-    if (!isFatalError && Frens::isPsramEnabled()) {
-        cd_chd_diag_run();
-    }
-#endif
     buildPaletteLUT();
 
     bool showSplash = true;
@@ -887,7 +879,11 @@ int main()
             // carts are 1 MB anyway, which already needs PSRAM to hold the ROM.
             const char *menuExts;
 #if PICO_RP2350
+#if ENABLE_CHD
+            menuExts = Frens::isPsramEnabled() ? ".pce .cue .chd .sgx" : ".pce";
+#else
             menuExts = Frens::isPsramEnabled() ? ".pce .cue .sgx" : ".pce";
+#endif
 #else
             menuExts = ".pce";
 #endif
@@ -903,7 +899,11 @@ int main()
         if (strlen(selectedRom) > 0) {
             char ext[8];
             Frens::getextensionfromfilename(selectedRom, ext, sizeof(ext));
-            isCDGame  = (strcasecmp(ext, ".cue") == 0);
+            isCDGame  = (strcasecmp(ext, ".cue") == 0
+#if ENABLE_CHD
+                      || strcasecmp(ext, ".chd") == 0
+#endif
+                        );
             isSgxGame = (strcasecmp(ext, ".sgx") == 0);
         }
 
@@ -1000,6 +1000,26 @@ int main()
             }
 
             printf("Starting game\n");
+            // CHD on HSTX needs a larger core1 stack (libchdr's chd_read uses
+            // ~6-10 KB; default is 4 KB and overflowing zeroes the hunk-cache
+            // pointer array → silent CD audio). Growing the static stack
+            // permanently starves SGX's SRAM heap, so swap core1's stack only
+            // for the duration of this CHD game by tearing HSTX down,
+            // resetting core1, and relaunching it with a fresh 8 KB heap
+            // buffer. The pointer is remembered here so the exit branch can
+            // restore the default stack and free the heap buffer.
+#if HSTX && ENABLE_CHD
+            uint32_t *chd_core1_stack = nullptr;
+            if (isCDGame && cd_chd_is_active()) {
+                chd_core1_stack = (uint32_t *)malloc(8192);
+                if (chd_core1_stack) {
+                    printf("[hstx] swapping core1 stack: default 4 KB -> 8 KB malloc for CHD\n");
+                    hstx_restart_core1(chd_core1_stack, 8192);
+                } else {
+                    printf("[hstx] WARN: malloc(8192) for CHD core1 stack failed; CD audio will be silent\n");
+                }
+            }
+#endif
             if (isCDGame) {
 #if HSTX
                 extern void video_output_set_background_task(void (*)(void));
@@ -1040,6 +1060,16 @@ int main()
             } else {
                 PCE.ROM = NULL; // prevent ShutdownPCE from freeing flash/PSRAM
             }
+#if HSTX && ENABLE_CHD
+            if (chd_core1_stack) {
+                size_t default_bytes = 0;
+                void *default_stack = hstx_default_core1_stack(&default_bytes);
+                printf("[hstx] restoring core1 stack to default 4 KB\n");
+                hstx_restart_core1((uint32_t *)default_stack, default_bytes);
+                free(chd_core1_stack);
+                chd_core1_stack = nullptr;
+            }
+#endif
             ShutdownPCE();
         } while (resetGame);
 

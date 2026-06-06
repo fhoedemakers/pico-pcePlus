@@ -28,6 +28,11 @@ typedef struct {
 	                        // PREGAP directive). When pregap audio is baked
 	                        // into the BIN (INDEX 00 + INDEX 01 form), this
 	                        // is 0 and file_lba carries the offset instead.
+	uint32_t chd_frame_start; // CHD-mode only: index of this track's first
+	                          // frame within the CHD's storage. Tracks are
+	                          // padded to CD_TRACK_PADDING (4) frame boundaries
+	                          // in the CHD, so this is NOT just sum of prior
+	                          // tracks' frame counts.
 	uint8_t  type;          // 0 = audio, 1 = data
 	uint8_t  sector_size;   // 0 = 2048, 1 = 2352
 	uint8_t  track_no;      // 1-based track number
@@ -158,6 +163,12 @@ typedef struct {
 
 	// CD attached flag
 	bool     cd_attached;
+
+	// CHD-backed disc: when true, read_sector / cd_audio_update go through
+	// the libchdr backend in cd_chd.c instead of the FatFs CUE+BIN path.
+	// chd_handle is opaque (void *) so cd.h doesn't need to pull in chd.h.
+	bool     is_chd;
+	void    *chd_handle;
 } cd_state_t;
 
 extern cd_state_t CD;

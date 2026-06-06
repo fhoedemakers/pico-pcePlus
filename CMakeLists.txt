@@ -94,23 +94,6 @@ endif()
 
 pico_sdk_init()
 
-# Replace the SDK's pico_malloc INTERFACE source (rp2_common/pico_malloc/
-# malloc.c — a tiny mutex + OOM-panic wrapper) with our PSRAM-routing
-# implementation. The SDK already calls pico_wrap_function on
-# malloc/calloc/realloc/free, so the wraps are wired; we just need our
-# __wrap_* symbols to be the ones the linker picks. By overriding
-# INTERFACE_SOURCES the SDK's file is dropped from picopcePlus's compile
-# inputs, leaving only our cd_chd_alloc_wrap.cpp.
-#
-# Required because libchdr's chd_open allocates ~hundreds of KB (per-hunk
-# map + zlib/LZMA/zstd state) which the 264 KB SRAM heap can't satisfy;
-# PSRAM has 5+ MB free.
-if(ENABLE_CHD)
-    set_property(TARGET pico_malloc PROPERTY INTERFACE_SOURCES
-        ${CMAKE_CURRENT_SOURCE_DIR}/cd_chd_alloc_wrap.cpp
-    )
-endif()
-
 # check_and_add_pico_pio_usb_support() needs pico_generate_pio_header which is
 # only available after pico_sdk_init().  The first call inside family.cmake
 # (before SDK init) was a no-op; this second call actually creates the
@@ -136,7 +119,6 @@ add_executable(${projectname}
     EmuOverlay444.c
     EmuOverlay555.c
     state.cpp
-    cd_chd_diag.cpp
 )
 
 pico_set_program_name(${projectname} "${projectname}")

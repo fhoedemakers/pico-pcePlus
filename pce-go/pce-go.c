@@ -9,6 +9,7 @@
 #include "psg.h"
 #include "pce.h"
 #include "cd.h"
+#include "cd_chd.h"
 
 #include "ff.h"
 
@@ -367,9 +368,20 @@ LoadDisc(const char *cue_path)
 	memset(CD.acd_ram,   0,    ACD_RAM_SIZE);
 	memset(CD.bram,      0xFF, BRAM_PAGE_SIZE);   // "empty" pattern
 
-	// --- 4. Parse CUE + open BIN ---
-	if (cd_load_cue(cue_path) != 0) {
-		MESSAGE_ERROR("cd_load_cue failed for %s\n", cue_path);
+	// --- 4. Parse CUE + open BIN, OR open the CHD ---
+	// The caller passes a file path; switch on extension. .chd files take
+	// the libchdr backend in cd_chd.c; .cue files go through the existing
+	// FatFs CUE+BIN parser.
+	size_t plen = strlen(cue_path);
+	bool path_is_chd = (plen >= 4) &&
+	                   (cue_path[plen - 4] == '.') &&
+	                   (cue_path[plen - 3] == 'c' || cue_path[plen - 3] == 'C') &&
+	                   (cue_path[plen - 2] == 'h' || cue_path[plen - 2] == 'H') &&
+	                   (cue_path[plen - 1] == 'd' || cue_path[plen - 1] == 'D');
+	int load_rc = path_is_chd ? cd_chd_open(cue_path) : cd_load_cue(cue_path);
+	if (load_rc != 0) {
+		MESSAGE_ERROR("%s failed for %s\n",
+		              path_is_chd ? "cd_chd_open" : "cd_load_cue", cue_path);
 		unload_disc_state();
 		return -2;
 	}

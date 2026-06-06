@@ -18,6 +18,7 @@
 #include "pce-go.h"
 #include "pce.h"
 #include "cd.h"
+#include "cd_chd.h"
 
 // Persistent BIN file handle, allocated from PSRAM while a disc is open.
 static FIL *bin_fil = NULL;
@@ -229,7 +230,13 @@ static bool has_pce_extension(const char *name)
 {
 	size_t n = strlen(name);
 	if (n < 4) return false;
-	return strcasecmp(name + n - 4, ".pce") == 0;
+	if (strcasecmp(name + n - 4, ".pce") == 0) return true;
+	// Common alternate naming for system-card BIOS dumps shipped alongside
+	// CUE+BIN / CHD images: accept "cd_bios.rom" (case-insensitive) as a
+	// per-game BIOS so users can drop one into the disc folder without
+	// renaming. CRC lookup still decides which BIOS variant it is.
+	if (strcasecmp(name, "cd_bios.rom") == 0) return true;
+	return false;
 }
 
 static uint32_t crc32_of_file(const char *path)
@@ -711,6 +718,8 @@ cd_close(void)
 		audio_fil = NULL;
 	}
 	audio_bin_name[0] = '\0';
+	// CHD-backed disc: release libchdr's state + hunk cache.
+	cd_chd_close();
 	memset(CD.tracks, 0, sizeof(CD.tracks));
 	CD.num_tracks = 0;
 	CD.first_track = 0;
@@ -784,6 +793,20 @@ static int read_sector(uint32_t lba)
 	int idx = find_track(lba);
 	if (idx < 0) return -1;
 	cd_track_t *t = &CD.tracks[idx];
+
+	// CHD-backed disc: pull a raw 2352-byte sector through the hunk cache
+	// (libchdr decompression) and skip the 16-byte sync header to give the
+	// SCSI layer the same 2048-byte MODE1 payload it gets for CUE+BIN.
+	if (CD.is_chd) {
+		static uint8_t raw_sector[CD_RAW_SECTOR_SIZE];
+		mutex_enter_blocking(&sd_mutex);
+		int rc = cd_chd_read_raw_sector(lba, raw_sector);
+		mutex_exit(&sd_mutex);
+		if (rc != 0) return -1;
+		memcpy(CD.sector_buf, raw_sector + 16, CD_SECTOR_SIZE);
+		return 0;
+	}
+
 	if (open_bin_for_track(idx) != 0) return -1;
 
 	uint32_t raw = t->sector_size ? CD_RAW_SECTOR_SIZE : CD_SECTOR_SIZE;
@@ -1926,27 +1949,51 @@ cd_audio_update(void)
 			break;
 
 		cd_track_t *t = &CD.tracks[idx];
-		uint64_t off = t->bin_offset + (uint64_t)(next_lba - t->lba_start) * CD_RAW_SECTOR_SIZE;
+		uint8_t *dst = &CD.audio_ring_buf[CD.audio_ring_write * CD_RAW_SECTOR_SIZE];
+		int ok = 0;
 
-		mutex_enter_blocking(&sd_mutex);
-		if (open_bin_for_audio(idx) != 0) {
+		if (CD.is_chd) {
+			// CHD-backed: pull a raw audio sector through the hunk cache.
+			// cd_chd_read_raw_sector already handles the chdman big-endian
+			// -> host little-endian byteswap for audio tracks.
+			//
+			// Use non-blocking mutex acquisition: cd_chd_read_raw_sector
+			// can call libchdr's chd_read which takes ~30 ms per hunk on a
+			// cache miss. If core0 already holds sd_mutex for a SCSI data
+			// read (also ~30 ms for CHD data tracks), blocking here can
+			// stall core1's main loop long enough that the HSTX DMA chain
+			// underflows and the watchdog triggers a resync. The audio
+			// ring has up to 4 sectors of slack (~52 ms), so skipping a
+			// fill cycle is preferable to blocking.
+			if (!mutex_try_enter(&sd_mutex, NULL))
+				break;
+			ok = (cd_chd_read_raw_sector(next_lba, dst) == 0);
 			mutex_exit(&sd_mutex);
-			break;
-		}
-		if (off != audio_next_file_off) {
-			if (f_lseek(audio_fil, off) != FR_OK) {
+			if (!ok) break;
+			audio_next_file_off = 0xFFFFFFFF;  // CHD path has no linear file cursor
+		} else {
+			uint64_t off = t->bin_offset
+			             + (uint64_t)(next_lba - t->lba_start) * CD_RAW_SECTOR_SIZE;
+
+			mutex_enter_blocking(&sd_mutex);
+			if (open_bin_for_audio(idx) != 0) {
 				mutex_exit(&sd_mutex);
 				break;
 			}
-		}
-		uint8_t *dst = &CD.audio_ring_buf[CD.audio_ring_write * CD_RAW_SECTOR_SIZE];
-		UINT br;
-		int ok = (f_read(audio_fil, dst, CD_RAW_SECTOR_SIZE, &br) == FR_OK
-		          && br == CD_RAW_SECTOR_SIZE);
-		mutex_exit(&sd_mutex);
+			if (off != audio_next_file_off) {
+				if (f_lseek(audio_fil, off) != FR_OK) {
+					mutex_exit(&sd_mutex);
+					break;
+				}
+			}
+			UINT br;
+			ok = (f_read(audio_fil, dst, CD_RAW_SECTOR_SIZE, &br) == FR_OK
+			      && br == CD_RAW_SECTOR_SIZE);
+			mutex_exit(&sd_mutex);
 
-		if (!ok) break;
-		audio_next_file_off = off + CD_RAW_SECTOR_SIZE;
+			if (!ok) break;
+			audio_next_file_off = off + CD_RAW_SECTOR_SIZE;
+		}
 
 		CD.audio_ring_write = (CD.audio_ring_write + 1) & 3;
 		__atomic_add_fetch(&CD.audio_ring_count, 1, __ATOMIC_RELEASE);

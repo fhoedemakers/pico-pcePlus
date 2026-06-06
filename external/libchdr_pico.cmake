@@ -17,6 +17,9 @@
 set(CHDR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/libchdr)
 
 add_library(libchdr_pico STATIC
+    # PSRAM allocator wrappers (referenced by every libchdr source via the
+    # `-include external/libchdr_alloc.h` below).
+    ${CMAKE_CURRENT_SOURCE_DIR}/cd_chd_alloc_wrap.cpp
     # core
     ${CHDR_DIR}/src/libchdr_bitstream.c
     ${CHDR_DIR}/src/libchdr_cdrom.c
@@ -73,8 +76,13 @@ target_compile_options(libchdr_pico PRIVATE
     -Wno-pointer-sign
     -Wno-strict-aliasing
 )
-# Reroute libchdr's stdlib malloc/free/calloc/realloc to PSRAM via linker
-# --wrap: cleaner than macro-redefining stdlib names (which breaks
-# declarations like `extern void *calloc(size_t, size_t)`). The wrap is on
-# the final executable below (target_link_options on picopcePlus), not on
-# this static lib — but the wrappers must exist for it to work.
+# Force-include redirects every malloc/free/calloc/realloc CALL inside the
+# libchdr translation units to PSRAM-backed wrappers in
+# cd_chd_alloc_wrap.cpp. Scoped to this target only — the rest of the
+# binary (especially the emulator's runtime allocations for PCE.VRAM /
+# PCE.RAM / MemoryMap) stays on newlib's SRAM heap. Two struct-method
+# dispatch sites in libchdr_chd.c are parenthesised so the function-like
+# `free(` macro pattern doesn't accidentally fire on `obj->free(arg)`.
+target_compile_options(libchdr_pico PRIVATE
+    -include ${CMAKE_CURRENT_SOURCE_DIR}/external/libchdr_alloc.h
+)
