@@ -13,7 +13,7 @@ This project is based on [pce-go](https://github.com/ducalex/retro-go) from retr
 ### Features
 
 - **PC Engine / TurboGrafx-16 Emulation** – Execute HuCard ROM files (`.pce`) directly from an SD card
-- **CD-ROM² Support** – Play CD-ROM² games using CUE/BIN disc images with CD-DA audio and ADPCM playback (requires PSRAM)
+- **CD-ROM² Support** – Play CD-ROM² games using CUE/BIN or CHD disc images with CD-DA audio and ADPCM playback (requires PSRAM)
 - **SD Card Menu System** – Browse and launch games from an on-screen menu interface
 - **Dual Controller Support** – Two simultaneous controllers for multiplayer gameplay
 - **Save State Management** – Save and restore game states
@@ -37,7 +37,7 @@ This is part of a family of Raspberry Pi Pico emulator projects:
 1. Prepare an SD card formatted as FAT32 or exFAT
 2. Transfer PC Engine ROM files (`.pce`) to the card (subdirectory organization is supported)
 3. For CD-ROM² games:
-   - Place CUE/BIN disc image files on the SD card
+   - Place CUE/BIN or CHD disc image files on the SD card
    - Install a compatible BIOS file (see [CD-ROM BIOS Setup](#cd-rom-bios-setup) below)
    - A board with PSRAM is required
 4. Insert the SD card into the device
@@ -153,7 +153,7 @@ Boards without PSRAM — such as the stock Raspberry Pi Pico 2 — can run:
 
 What is **not** available without PSRAM:
 
-- **CD-ROM² games** (CUE/BIN images) – These will not load. The CD-ROM² system needs more working RAM (for the CD work RAM, ADPCM buffers, and Super/Arcade Card expansions) than the RP2350 has on-chip.
+- **CD-ROM² games** (CUE/BIN or CHD images) – These will not load. The CD-ROM² system needs more working RAM (for the CD work RAM, ADPCM buffers, and Super/Arcade Card expansions) than the RP2350 has on-chip.
 - **SuperGrafx games (`.sgx` files)** – Cannot be played without PSRAM; the extra VDC/VRAM does not fit in the RP2350's on-chip SRAM.
 - **System Card BIOS booting** – Without PSRAM, the BIOS will not be executed and CD-ROM² titles cannot be played.
 
@@ -162,7 +162,7 @@ What is **not** available without PSRAM:
 Boards with PSRAM — either built-in (Pimoroni Pico Plus 2, Adafruit Fruit Jam) or added as an optional module (Waveshare RP2350-PiZero, Adafruit Metro RP2350) — can run everything the RP2350-only configuration supports, **plus**:
 
 - **SuperGrafx games (`.sgx` files)** – The expanded VDC and extra video RAM used by SuperGrafx titles (e.g. *Aldynes*, *Ghouls 'n Ghosts*, *1941: Counter Attack*) require PSRAM.
-- **CD-ROM² games** – Play CUE/BIN disc images, including titles using:
+- **CD-ROM² games** – Play CUE/BIN or CHD disc images, including titles using:
   - Standard **CD-ROM System** (System Card 1.x / 2.x)
   - **Super CD-ROM System** (System Card 3.0) games
   - **Arcade Card Duo / Arcade Card Pro** enhanced titles
@@ -179,7 +179,7 @@ Boards with PSRAM — either built-in (Pimoroni Pico Plus 2, Adafruit Fruit Jam)
 | Save states | ✅ | ✅ |
 | Menu, metadata, box art | ✅ | ✅ |
 | Dual controllers, DVI/HSTX video, PSG audio | ✅ | ✅ |
-| CD-ROM² games (CUE/BIN) | ❌ | ✅ |
+| CD-ROM² games (CUE/BIN or CHD) | ❌ | ✅ |
 | Super CD-ROM / Arcade Card games | ❌ | ✅ |
 | CD-DA audio + ADPCM playback | ❌ | ✅ |
 | System Card BIOS support | ❌ | ✅ |
