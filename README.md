@@ -13,11 +13,11 @@ This project is based on [pce-go](https://github.com/ducalex/retro-go) from retr
 ### Features
 
 - **PC Engine / TurboGrafx-16 Emulation** – Execute HuCard ROM files (`.pce`) directly from an SD card
-- **CD-ROM² Support** – Play CD-ROM² games using CUE/BIN or CHD disc images with CD-DA audio and ADPCM playback (requires PSRAM)
+- **CD-ROM² Support** – Play CD-ROM² games using CUE/BIN or CHD disc images with ADPCM playback (requires PSRAM)
 - **SD Card Menu System** – Browse and launch games from an on-screen menu interface
 - **Dual Controller Support** – Two simultaneous controllers for multiplayer gameplay
 - **Save State Management** – Save and restore game states
-- **Audio** – PSG sound with per-scanline generation, CD-DA audio mixing, and ADPCM decoding
+- **Audio** – PSG sound with per-scanline generation and ADPCM decoding
 - **Multiple Display Modes** – DVI (PicoDVI) and HSTX output with configurable screen modes
 - **Flexible Hardware** – Compatible with standard DVI/HDMI breakout boards and various RP2350 boards
 
@@ -170,7 +170,6 @@ Boards with PSRAM — either built-in (Pimoroni Pico Plus 2, Adafruit Fruit Jam)
   - Standard **CD-ROM System** (System Card 1.x / 2.x)
   - **Super CD-ROM System** (System Card 3.0) games
   - **Arcade Card Duo / Arcade Card Pro** enhanced titles
-- **CD-DA (Red Book) audio** mixing for CD soundtracks.
 - **ADPCM** sample playback used by CD-ROM² games for voice and effects.
 - A valid System Card BIOS placed in `/bios/` on the SD card (see [CD-ROM BIOS Setup](#cd-rom-bios-setup)).
 
@@ -185,7 +184,7 @@ Boards with PSRAM — either built-in (Pimoroni Pico Plus 2, Adafruit Fruit Jam)
 | Dual controllers, DVI/HSTX video, PSG audio | ✅ | ✅ |
 | CD-ROM² games (CUE/BIN or CHD) | ❌ | ✅ |
 | Super CD-ROM / Arcade Card games | ❌ | ✅ |
-| CD-DA audio + ADPCM playback | ❌ | ✅ |
+| ADPCM playback | ❌ | ✅ |
 | System Card BIOS support | ❌ | ✅ |
 
 ***
