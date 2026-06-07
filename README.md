@@ -13,11 +13,11 @@ This project is based on [pce-go](https://github.com/ducalex/retro-go) from retr
 ### Features
 
 - **PC Engine / TurboGrafx-16 Emulation** – Execute HuCard ROM files (`.pce`) directly from an SD card
-- **CD-ROM² Support** – Play CD-ROM² games using CUE/BIN or CHD disc images with ADPCM playback (requires PSRAM)
+- **CD-ROM² Support** – Play CD-ROM² games using CUE/BIN disc images with CD-DA audio and ADPCM playback (requires PSRAM)
 - **SD Card Menu System** – Browse and launch games from an on-screen menu interface
 - **Dual Controller Support** – Two simultaneous controllers for multiplayer gameplay
 - **Save State Management** – Save and restore game states
-- **Audio** – PSG sound with per-scanline generation and ADPCM decoding
+- **Audio** – PSG sound with per-scanline generation, CD-DA audio mixing, and ADPCM decoding
 - **Multiple Display Modes** – DVI (PicoDVI) and HSTX output with configurable screen modes
 - **Flexible Hardware** – Compatible with standard DVI/HDMI breakout boards and various RP2350 boards
 
@@ -37,7 +37,7 @@ This is part of a family of Raspberry Pi Pico emulator projects:
 1. Prepare an SD card formatted as FAT32 or exFAT
 2. Transfer PC Engine ROM files (`.pce`) to the card (subdirectory organization is supported)
 3. For CD-ROM² games:
-   - Place CUE/BIN or CHD disc image files on the SD card
+   - Place CUE/BIN disc image files on the SD card
    - Install a compatible BIOS file (see [CD-ROM BIOS Setup](#cd-rom-bios-setup) below)
    - A board with PSRAM is required
 4. Insert the SD card into the device
@@ -90,8 +90,20 @@ CD-ROM² games require a System Card BIOS to boot. You must provide your own BIO
 ### Installation
 
 1. Create a `/bios/` folder in the root of your SD card
-2. Place one or more BIOS files (with `.pce` extension) in the `/bios/` folder
+2. Place one or more BIOS files (with a `.pce` extension, or named `cd_bios.rom`) in the `/bios/` folder
 3. The emulator will automatically scan this folder, identify the BIOS by its CRC32 checksum, and select the best available one
+
+### Per-game BIOS override
+
+The emulator also looks for a BIOS in the **same folder as the CUE/BIN or CHD file** of the game you are launching. If a `.pce` file (or a file named `cd_bios.rom`) is found next to the disc image, it is loaded **instead of** the BIOS in `/bios/`. The `/bios/` folder is only used as a fallback when the disc folder contains no usable BIOS.
+
+This is useful for:
+
+- Running a specific region's BIOS for a single game without changing your default
+- Shipping a game patch that depends on a particular System Card version
+- Keeping unmodified game folders self-contained on the SD card
+
+CRC32 detection still applies in the per-game folder, so the variant (System Card 1.x/2.x/3.0, Arcade Card Duo/Pro, Games Express, US/JP region) is selected automatically.
 
 ### Supported BIOS Files
 
@@ -139,53 +151,6 @@ For detailed setup instructions, refer to the [pico-infonesPlus documentation](h
 
 ***
 
-## Hardware Capabilities: RP2350 vs RP2350 + PSRAM
-
-The emulator runs on any RP2350-based board, but the set of supported software depends on whether the board has PSRAM. The RP2350's internal SRAM is sufficient for HuCard titles, while CD-ROM² emulation requires the additional memory that only PSRAM can provide.
-
-### RP2350 only (no PSRAM)
-
-Boards without PSRAM — such as the stock Raspberry Pi Pico 2 — can run:
-
-- **HuCard ROMs (`.pce` files)** – The full PC Engine / TurboGrafx-16 HuCard library, loaded directly from the SD card.
-- **Save states** for HuCard games.
-- **All standard emulator features** – on-screen menu, dual controller support, DVI/HSTX video output, PSG audio, and metadata/box art display.
-
-What is **not** available without PSRAM:
-
-- **CD-ROM² games** (CUE/BIN or CHD images) – These will not load. The CD-ROM² system needs more working RAM (for the CD work RAM, ADPCM buffers, and Super/Arcade Card expansions) than the RP2350 has on-chip.
-- **SuperGrafx games (`.sgx` files)** – Cannot be played without PSRAM; the extra VDC/VRAM does not fit in the RP2350's on-chip SRAM.
-- **System Card BIOS booting** – Without PSRAM, the BIOS will not be executed and CD-ROM² titles cannot be played.
-
-### RP2350 + PSRAM
-
-Boards with PSRAM — either built-in (Pimoroni Pico Plus 2, Adafruit Fruit Jam) or added as an optional module (Waveshare RP2350-PiZero, Adafruit Metro RP2350) — can run everything the RP2350-only configuration supports, **plus**:
-
-- **SuperGrafx games (`.sgx` files)** – The expanded VDC and extra video RAM used by SuperGrafx titles (e.g. *Aldynes*, *Ghouls 'n Ghosts*, *1941: Counter Attack*) require PSRAM. SuperGrafx support is still experimental and some games may exhibit graphical or audio glitches. For full 60 fps and decent audio quality, an **HSTX**-based board is recommended; DVI/PicoDVI boards may run SuperGrafx titles below full speed with reduced audio quality.
-
-- **CD-ROM² games** – Play CUE/BIN or CHD disc images, including titles using:
-  - Standard **CD-ROM System** (System Card 1.x / 2.x)
-  - **Super CD-ROM System** (System Card 3.0) games
-  - **Arcade Card Duo / Arcade Card Pro** enhanced titles
-- **ADPCM** sample playback used by CD-ROM² games for voice and effects.
-- A valid System Card BIOS placed in `/bios/` on the SD card (see [CD-ROM BIOS Setup](#cd-rom-bios-setup)).
-
-### Quick summary
-
-| Capability | RP2350 only | RP2350 + PSRAM |
-|---|:---:|:---:|
-| HuCard ROMs (`.pce`) | ✅ | ✅ |
-| SuperGrafx ROMs (`.sgx`) | ❌ | ✅ (HSTX recommended) |
-| Save states | ✅ | ✅ |
-| Menu, metadata, box art | ✅ | ✅ |
-| Dual controllers, DVI/HSTX video, PSG audio | ✅ | ✅ |
-| CD-ROM² games (CUE/BIN or CHD) | ❌ | ✅ |
-| Super CD-ROM / Arcade Card games | ❌ | ✅ |
-| ADPCM playback | ❌ | ✅ |
-| System Card BIOS support | ❌ | ✅ |
-
-***
-
 ## Gamecontroller Support
 
 Depending on the hardware configuration, the emulator supports these game controllers:
@@ -204,6 +169,53 @@ Depending on the hardware configuration, the emulator supports these game contro
 
 - NES / SNES controllers (directly wired)
 - Wii Classic Controller (via I2C)
+
+***
+
+## In-Game Hotkeys
+
+The emulator reacts to button combinations on controller 1 during gameplay. The combinations use the PC Engine controller's **SELECT** and **RUN** buttons together with the directional pad or action buttons.
+
+### SELECT + …
+
+| Combo | Action |
+|---|---|
+| SELECT + RUN | Open the in-game settings menu |
+| SELECT + UP / DOWN | Cycle screen mode (1:1 ↔ 8:7, scanlines on/off) on DVI boards; toggle scanlines on HSTX boards |
+| SELECT + LEFT | Toggle external (I²S) audio output (DVI boards only) |
+| SELECT + RIGHT | Toggle the VU meter LEDs (boards that support it) |
+
+### RUN + …
+
+| Combo | Action |
+|---|---|
+| RUN + A | Toggle the on-screen FPS overlay |
+| RUN + B | Start recording in-game audio to a WAV file on the SD card (requires PSRAM) |
+| RUN + UP | Quick-load a save state |
+| RUN + DOWN | Quick-save a save state |
+| RUN + LEFT / RIGHT | Adjust output volume (Adafruit Fruit Jam only) |
+
+***
+
+## Save States and Backup RAM
+
+- **Save states** – Manual save/load slots are available for any game through the in-game menu or via the **RUN + UP/DOWN** hotkeys. Save state files are stored on the SD card under `/savestates/PCE/<CRC32>/`.
+- **Auto-save state** – When enabled in the settings menu, the emulator automatically saves a state when you exit a game and offers to resume it the next time the same ROM is launched.
+- **CD-ROM² Backup RAM (BRAM)** – CD-ROM² games that use the System Card's BRAM (e.g. to save progress) get their BRAM persisted automatically. The file is written to `/savestates/PCE/<CRC32>/bram.sav` when the game exits, and reloaded the next time the same disc image is launched.
+
+***
+
+## Audio Recording
+
+On boards with PSRAM, the emulator can record the live audio output to a `.wav` file on the SD card. Press **RUN + B** during gameplay to start a recording; the file is finalised when the recording is stopped or the game exits. This is useful for capturing soundtracks, BGM, or evidence of an emulation issue.
+
+***
+
+## Performance and CD-ROM² Frame Pacing
+
+- The emulator targets a steady **60 fps** for HuCard games.
+- For CD-ROM² games, an **adaptive frame-skip** kicks in when the SoC cannot finish a frame in time (typically during heavy CD streaming). The skip is limited so that video never drops below **30 fps**, and the emulator never skips two frames in a row, keeping motion smooth even on busy scenes.
+- HSTX boards run the video output in a streamed mode that frees more time for CD audio and ADPCM mixing — this is one of the reasons HSTX is preferred for CD-ROM² and SuperGrafx titles.
 
 ***
 
