@@ -742,30 +742,49 @@ void __not_in_flash_func(process)(void)
 #endif
         ProcessAfterFrameIsRendered();
 #if PICO_RP2350
-        // Frame-skip for render-bound CD scenes: when the emulator can't hold
-        // 60fps, audio underruns (HDMI drops / I2S crackles). Drop the next
-        // frame's draw so CPU+audio run at full speed while only the picture
-        // stalls. Never skip twice running → >=30fps video.
+        // Frame-skip when the emulator can't hold 60fps. Originally for CD
+        // games (audio underrun → HDMI drops / I2S crackles); now also
+        // applied to HuCard / SGX scenes with heavy sprite work where the
+        // PSG audio crackles for the same reason. Skipping rendering keeps
+        // CPU+audio running at full speed while only the picture stalls.
+        // Never skip twice in a row → ≥30fps video.
+        //
+        // PicoDVI CD-FB path keeps the precise audio-ring "behind" signal
+        // (only available there). Everything else falls back to wall-clock
+        // overrun: PCE_FRAME_SKIP_OVERRUN_US is tunable from CMakeLists.txt
+        // and defaults to 16200 µs — proactive (just under one 60Hz frame)
+        // so we skip before the audio queue actually underruns.
+#ifndef PCE_FRAME_SKIP_OVERRUN_US
+#define PCE_FRAME_SKIP_OVERRUN_US 16200u
+#endif
+#if !HSTX
         if (CD.cd_attached)
         {
-#if !HSTX
-            // PicoDVI: audio-ring fill is the authoritative "behind" signal.
+            // PicoDVI CD: audio-ring fill is the authoritative signal.
             bool behind = cdFb && cdAudioFillPermille() < 250;
-#else
-            // HSTX: no audio-ring query on core0; use wall-clock overrun.
-            // Trigger at 16200µs (not 16667) so we skip proactively before
-            // the DI queue underruns, rather than reacting after the damage.
-            static uint32_t lastFrameEnd = 0;
-            uint32_t now = time_us_32();
-            bool behind = lastFrameEnd && (now - lastFrameEnd) > 16200;
-            lastFrameEnd = now;
-#endif
             skipRender = behind && !skipRender;
         }
         else
         {
-            skipRender = false;
+            // PicoDVI HuCard / SGX: no audio-ring query → wall-clock overrun.
+            static uint32_t lastFrameEndPcd = 0;
+            uint32_t now = time_us_32();
+            bool behind = lastFrameEndPcd
+                       && (now - lastFrameEndPcd) > PCE_FRAME_SKIP_OVERRUN_US;
+            lastFrameEndPcd = now;
+            skipRender = behind && !skipRender;
         }
+#else
+        // HSTX (CD or HuCard / SGX): wall-clock overrun. CD didn't have an
+        // audio-ring query on core0 either, so this branch has always used
+        // the timer-based trigger; we just stop gating it on CD.cd_attached.
+        static uint32_t lastFrameEnd = 0;
+        uint32_t now = time_us_32();
+        bool behind = lastFrameEnd
+                   && (now - lastFrameEnd) > PCE_FRAME_SKIP_OVERRUN_US;
+        lastFrameEnd = now;
+        skipRender = behind && !skipRender;
+#endif
 #endif
     }
     gfx_set_skip_render(false);
