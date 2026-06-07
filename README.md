@@ -161,10 +161,7 @@ What is **not** available without PSRAM:
 
 Boards with PSRAM — either built-in (Pimoroni Pico Plus 2, Adafruit Fruit Jam) or added as an optional module (Waveshare RP2350-PiZero, Adafruit Metro RP2350) — can run everything the RP2350-only configuration supports, **plus**:
 
-- **SuperGrafx games (`.sgx` files)** – The expanded VDC and extra video RAM used by SuperGrafx titles (e.g. *Aldynes*, *Ghouls 'n Ghosts*, *1941: Counter Attack*) require PSRAM.
-
-  > [!NOTE]
-  > SuperGrafx support is still experimental and some games may exhibit graphical or audio glitches. For full 60 fps and decent audio quality, an **HSTX**-based board is recommended; DVI/PicoDVI boards may run SuperGrafx titles below full speed with reduced audio quality.
+- **SuperGrafx games (`.sgx` files)** – The expanded VDC and extra video RAM used by SuperGrafx titles (e.g. *Aldynes*, *Ghouls 'n Ghosts*, *1941: Counter Attack*) require PSRAM. SuperGrafx support is still experimental and some games may exhibit graphical or audio glitches. For full 60 fps and decent audio quality, an **HSTX**-based board is recommended; DVI/PicoDVI boards may run SuperGrafx titles below full speed with reduced audio quality.
 
 - **CD-ROM² games** – Play CUE/BIN or CHD disc images, including titles using:
   - Standard **CD-ROM System** (System Card 1.x / 2.x)
