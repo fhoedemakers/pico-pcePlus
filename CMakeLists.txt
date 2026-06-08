@@ -44,7 +44,7 @@ message("* Current build type is : ${CMAKE_BUILD_TYPE}")
 # Hardware / board selection (project-specific)
 # ---------------------------------------------------------------------------
 if(NOT HW_CONFIG)
-    set(HW_CONFIG 14 CACHE STRING "Select the hardware configuration for your board")
+    set(HW_CONFIG 8 CACHE STRING "Select the hardware configuration for your board")
 endif()
 
 if(NOT USE_HSTX)
@@ -294,6 +294,16 @@ if(ENABLE_CHD)
     include(${CMAKE_CURRENT_SOURCE_DIR}/external/libchdr_pico.cmake)
     target_link_libraries(${projectname} PRIVATE libchdr_pico)
     target_compile_definitions(${projectname} PRIVATE ENABLE_CHD=1)
+    # NOTE on HSTX vs PicoDVI for CHD:
+    # cd_audio_update runs on core1 under HSTX (background task) and on
+    # core0 under PicoDVI (vsync wait task). libchdr's chd_read uses
+    # ~6-10 KB of stack — over HSTX core1's default 4 KB — and would
+    # overflow into adjacent SRAM. Growing the core1 stack permanently
+    # starves SGX's SRAM heap; a PSRAM-resident stack is too slow for
+    # the HSTX scanline path. Fix lives in main.cpp: when a CHD game
+    # mounts, the HSTX path tears HSTX + core1 down, mallocs an 8 KB
+    # stack, and relaunches core1; on game exit the original 4 KB
+    # static stack is restored. PicoDVI builds need no swap.
 endif()
 
 if(PICO_BOARD STREQUAL "pico_w" OR PICO_BOARD STREQUAL "pico2_w")

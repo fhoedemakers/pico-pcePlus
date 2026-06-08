@@ -147,6 +147,7 @@ This project is licensed under the GNU General Public License v3.0. See the [LIC
 ### USB and controllers
 
 - [TinyUSB](https://github.com/hathach/tinyusb) — USB host stack.
+- [Pico-PIO-USB](https://github.com/sekigon-gonnoc/Pico-PIO-USB) — software USB host implementation on PIO, by [sekigon-gonnoc](https://github.com/sekigon-gonnoc), used to expose a second USB port for controllers.
 - [tusb_XInput](https://github.com/Ryzee119/tusb_XInput) — XInput controller driver by [Ryzee119](https://github.com/Ryzee119).
 - NES gamepad and Wii Classic Controller support contributed by [PaintYourDragon](https://github.com/PaintYourDragon) and [Adafruit](https://github.com/adafruit).
 
