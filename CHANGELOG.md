@@ -26,7 +26,9 @@ First public release.
 
 - SuperGrafx titles are recognised and dispatched to the second VDC.
 - Requires an RP2350 board with PSRAM.
-- Still under development: a number of titles exhibit graphical glitches (for example background corruption in certain games) and not all SuperGrafx games are fully playable.
+- Still under development: .sgx games exhibit graphical glitches (for example background corruption in Ghouls 'n Ghosts).
+- On HSTX-based boards the CPU is overclocked to 378 MHz to sustain 60 fps. At this clock the TinyUSB host stack is disabled; USB controllers continue to work through Pico-PIO-USB.
+- On PicoDVI-based boards the CPU remains at 252 MHz; SuperGrafx titles fall back to frameskip and audio is does not work.
 
 **CD-ROM² / Super CD-ROM²**
 
@@ -35,8 +37,8 @@ First public release.
 	- **CUE/BIN** — uncompressed (recommended).
 	- **CHD** — MAME's compressed disc-image format, decompressed sector-by-sector at run time. Generally slower than CUE/BIN; useful when SD card space is limited.
 - CD-DA audio playback and ADPCM streaming.
-- Requires an RP2350 board with PSRAM and a user-supplied System Card BIOS at `/bios/` (or alongside the disc image).
-- BIOS files are identified by CRC32; when several are available the most capable variant is selected automatically. For maximum compatibility, **Super CD-ROM System v3.0 (JP)** or **Arcade Card Pro (JP)** is recommended.
+- Requires an RP2350 board with PSRAM and a user-supplied System Card BIOS at `/bios/` (or alongside the disc image). 
+- BIOS files must use the `.pce` extension or be named `cd_bios.rom`. They are identified by CRC32, and when several are present the most capable variant is selected automatically. For broadest compatibility, **Super CD-ROM System v3.0 (JP)** or **Arcade Card Pro (JP)** is recommended.
 
 **Save states**
 
