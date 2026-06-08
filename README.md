@@ -35,6 +35,8 @@ Two disc-image formats are accepted:
 
 Each disc image (and its associated tracks for CUE/BIN) should be placed in its own folder on the SD card.
 
+> **Note on SD card speed :** cd playback most notably when playing CHD images is sensitive to SD card speed. Slow or aging cards can cause intermittent horizontal black-line flicker in the image during  play; the same disc on a faster card runs cleanly. If you see flicker, try a different/faster SD card before suspecting the emulator. 
+
 ***
 
 ## Hardware requirements
