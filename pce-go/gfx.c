@@ -499,8 +499,9 @@ static struct {
 	int latched;
 } gfx_context_vdc2;
 
-// VDC2-side equivalent of PCE.ScrollYDiff lives in PCE.VPC.scroll_y_diff_vdc2
-// so the VPC port dispatcher in pce.c can update it.
+// VDC2 scroll-Y in SGX mode is driven by gfx_inc_scroll_y_sgx (Mesen2's
+// IncScrollY model). The VPC dispatcher in pce.c sets PCE.VPC.byr_pending_vdc2
+// on BYR writes; gfx_inc_scroll_y_sgx applies the new BYR on the next tick.
 
 static void __not_in_flash_func(draw_tiles_sgx_line)(const vdc_ctx_t *ctx,
 	uint8_t *col, uint8_t *flg, uint8_t *spr, int Y, int scroll_x, int scroll_y)
@@ -968,35 +969,60 @@ void __not_in_flash_func(gfx_latch_context)(int force)
 {
 	if (!gfx_context.latched || force) { // Context is already saved + we haven't render the line using it
 		gfx_context.scroll_x = IO_VDC_REG[BXR].W;
-		gfx_context.scroll_y = IO_VDC_REG[BYR].W - PCE.ScrollYDiff;
+		// In SGX mode VDC1's scroll_y is maintained by gfx_inc_scroll_y_sgx
+		// (Mesen2 IncScrollY model). In non-SGX mode keep the original
+		// ScrollYDiff arithmetic for backward compatibility with HuCard games.
+		if (!PCE.VPC.is_sgx) {
+			gfx_context.scroll_y = IO_VDC_REG[BYR].W - PCE.ScrollYDiff;
+		}
 		gfx_context.control = IO_VDC_REG[CR].W;
 		gfx_context.latched = 1;
 	}
 }
 
+// Mesen2 PceVdc::IncScrollY model, applied per visible scanline for both VDCs
+// when running in SGX mode. line_counter is the visible-area-relative scanline
+// number (line_counter == 0 is the first visible line).
+//
+// Each tick: if line_counter == 0 OR the corresponding BYR-pending flag is
+// set, copy the current BYR into bg_scroll_y without incrementing (matches
+// Mesen2's "latch new BYR, don't advance"). Otherwise bg_scroll_y++. The
+// gfx_context*.scroll_y fields are then set to (bg_scroll_y - line_counter)
+// so draw_tiles_sgx_line's existing `y = Y + scroll_y` produces the right
+// per-scanline BG row index.
+void __not_in_flash_func(gfx_inc_scroll_y_sgx)(int line_counter)
+{
+	// VDC1
+	if (line_counter == 0 || PCE.VPC.byr_pending_vdc1) {
+		PCE.VPC.bg_scroll_y_vdc1 = IO_VDC_REG[BYR].W;
+		PCE.VPC.byr_pending_vdc1 = 0;
+	} else {
+		PCE.VPC.bg_scroll_y_vdc1 = (PCE.VPC.bg_scroll_y_vdc1 + 1) & 0x1FF;
+	}
+	gfx_context.scroll_y = (int)PCE.VPC.bg_scroll_y_vdc1 - line_counter;
+
+	// VDC2
+	if (line_counter == 0 || PCE.VPC.byr_pending_vdc2) {
+		PCE.VPC.bg_scroll_y_vdc2 = PCE.VDC2.regs[BYR].W;
+		PCE.VPC.byr_pending_vdc2 = 0;
+	} else {
+		PCE.VPC.bg_scroll_y_vdc2 = (PCE.VPC.bg_scroll_y_vdc2 + 1) & 0x1FF;
+	}
+	gfx_context_vdc2.scroll_y = (int)PCE.VPC.bg_scroll_y_vdc2 - line_counter;
+}
+
 // Parallel latch for VDC2 — invoked from the VPC dispatcher when VDC2's CR/BXR/BYR
-// is written, and from gfx_run() at the start of each visible frame.
+// is written, and from gfx_run() at the start of each visible frame. In SGX
+// mode scroll_y is owned by gfx_inc_scroll_y_sgx (Mesen2 IncScrollY model),
+// so this only updates scroll_x and control.
 void __not_in_flash_func(gfx_latch_context_vdc2)(int force)
 {
 	if (!PCE.VPC.is_sgx) return;
 	if (!gfx_context_vdc2.latched || force) {
 		gfx_context_vdc2.scroll_x = PCE.VDC2.regs[BXR].W;
-		gfx_context_vdc2.scroll_y = PCE.VDC2.regs[BYR].W - PCE.VPC.scroll_y_diff_vdc2;
 		gfx_context_vdc2.control  = PCE.VDC2.regs[CR].W;
 		gfx_context_vdc2.latched  = 1;
 	}
-}
-
-// Per-scanline scroll-only latch for VDC2. Re-reads BXR/BYR so VDC2 stays in
-// scroll-sync with VDC1 (which gets force-latched per scanline in gfx_run),
-// but deliberately skips CR so brief mid-frame BG/sprite-enable toggles the
-// game performs don't make VDC2 BG flicker on/off scanline-by-scanline.
-void __not_in_flash_func(gfx_latch_scroll_vdc2)(void)
-{
-	if (!PCE.VPC.is_sgx) return;
-	gfx_context_vdc2.scroll_x = PCE.VDC2.regs[BXR].W;
-	gfx_context_vdc2.scroll_y = PCE.VDC2.regs[BYR].W - PCE.VPC.scroll_y_diff_vdc2;
-	gfx_context_vdc2.latched  = 1;
 }
 
 
@@ -1196,12 +1222,11 @@ void __not_in_flash_func(gfx_run)(void)
 				last_line_counter = line_counter;
 			}
 			gfx_latch_context(1);
-			// Scroll-only re-latch for VDC2 per scanline. Keeps VDC2 BG
-			// scroll-sync'd with VDC1 (matching their scroll_y_diff cadence)
-			// without re-reading CR — re-reading CR every scanline would
-			// pick up brief mid-frame BG-enable toggles and make VDC2 BG
-			// flicker on/off (Ghouls 'n Ghosts vertical-scroll demo).
-			if (PCE.VPC.is_sgx) gfx_latch_scroll_vdc2();
+			// Mesen2-style per-scanline scroll-Y latch for both VDCs in SGX
+			// mode. Sets gfx_context*.scroll_y based on the auto-incrementing
+			// bg_scroll_y_vdc1/2 (with pending-update handling), which is
+			// what real PCE/SGX hardware does and what Mesen2 emulates.
+			if (PCE.VPC.is_sgx) gfx_inc_scroll_y_sgx(line_counter);
 			osd_gfx_render_line = line_counter;
 			render_lines(line_counter, line_counter + 1);
 			line_counter++;

@@ -243,7 +243,16 @@ typedef struct {
 		uint8_t window_cfg[4];
 		uint8_t has_irq_vdc1;
 		uint8_t has_irq_vdc2;
-		int scroll_y_diff_vdc2; /* PCE.ScrollYDiff counterpart for VDC2 */
+		int scroll_y_diff_vdc2; /* unused in Mesen2 IncScrollY model, kept for ABI */
+		/* Mesen2 IncScrollY model (only used in SGX mode). bg_scroll_y_vdcN
+		 * is the per-scanline auto-incremented BG row index. byr_pending_vdcN
+		 * is set when the game writes BYR and cleared by the next IncScrollY
+		 * tick, which then loads bg_scroll_y from BYR without incrementing
+		 * (matches Mesen2 PceVdc::IncScrollY). */
+		uint16_t bg_scroll_y_vdc1;
+		uint16_t bg_scroll_y_vdc2;
+		uint8_t  byr_pending_vdc1;
+		uint8_t  byr_pending_vdc2;
 	} VPC;
 
 	// Programmable Sound Generator

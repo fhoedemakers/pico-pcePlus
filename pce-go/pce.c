@@ -341,14 +341,16 @@ static inline void __not_in_flash_func(vdc_io_write)(vdc_t *vdc, uint16_t *vram,
 		case BYR:
 			if (is_primary) {
 				gfx_latch_context(0);
-				PCE.ScrollYDiff = PCE.Scanline - 1 - VR_MINLINE;
+				if (PCE.VPC.is_sgx) {
+					// Mesen2 IncScrollY model: just flag the pending update,
+					// the next per-scanline tick replaces bg_scroll_y with
+					// the new BYR (no increment that scanline).
+					PCE.VPC.byr_pending_vdc1 = 1;
+				} else {
+					PCE.ScrollYDiff = PCE.Scanline - 1 - VR_MINLINE;
+				}
 			} else {
-				// Match VDC1's formula exactly so both VDCs share the same
-				// "scroll-Y reference frame" — any constant offset relative
-				// to Mesen2 then applies uniformly and the two BG layers
-				// scroll in lockstep with the player sprite.
-				int vdc2_minline = PCE.VDC2.regs[VPR].B.h + PCE.VDC2.regs[VPR].B.l;
-				PCE.VPC.scroll_y_diff_vdc2 = PCE.Scanline - 1 - vdc2_minline;
+				PCE.VPC.byr_pending_vdc2 = 1;
 				gfx_latch_context_vdc2(0);
 			}
 			break;
@@ -412,14 +414,17 @@ static inline void __not_in_flash_func(vdc_io_write)(vdc_t *vdc, uint16_t *vram,
 			else            gfx_latch_context_vdc2(0);
 			V &= 0x1;
 			if (is_primary) {
-				PCE.ScrollYDiff = PCE.Scanline - 1 - VR_MINLINE;
-				if (PCE.ScrollYDiff < 0) {
-					MESSAGE_DEBUG("PCE.ScrollYDiff went negative when substraction VPR.h/.l (%d,%d)\n",
-						VR(VPR).B.h, VR(VPR).B.l);
+				if (PCE.VPC.is_sgx) {
+					PCE.VPC.byr_pending_vdc1 = 1;
+				} else {
+					PCE.ScrollYDiff = PCE.Scanline - 1 - VR_MINLINE;
+					if (PCE.ScrollYDiff < 0) {
+						MESSAGE_DEBUG("PCE.ScrollYDiff went negative when substraction VPR.h/.l (%d,%d)\n",
+							VR(VPR).B.h, VR(VPR).B.l);
+					}
 				}
 			} else {
-				int vdc2_minline = PCE.VDC2.regs[VPR].B.h + PCE.VDC2.regs[VPR].B.l;
-				PCE.VPC.scroll_y_diff_vdc2 = PCE.Scanline - 1 - vdc2_minline;
+				PCE.VPC.byr_pending_vdc2 = 1;
 			}
 			break;
 
