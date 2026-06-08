@@ -457,20 +457,23 @@ static void __not_in_flash_func(draw_sprites)(const vdc_ctx_t *ctx, const uint64
 // ============================================================================
 // SuperGrafx (SGX) renderers
 // ----------------------------------------------------------------------------
-// Render VDC1 and VDC2 to independent (color, opaque-flag, sprite-flag) line
-// buffers, then the VPC mixer walks them and produces the final host scanline.
+// Render VDC1 and VDC2 to independent (color, flag) line buffers, then the
+// VPC mixer walks the two buffers and produces the final host scanline.
 //
-// Two mask bytes per pixel (0x00 = clear, 0xFF = set):
-//   flg = opaque (tile OR sprite drew here)
-//   spr = sprite (only sprite stores set this; tile path leaves it 0)
+// Flag byte per pixel:
+//   0x00 = transparent
+//   0xFF = drawn (any kind — tile or sprite)
 //
-// 0x00/0xFF encoding lets the mixer use the bytes as bitmasks directly and
-// process 4 pixels at a time with uint32 loads/stores. The opaque mask alone
-// drives the fast `mode 0` path (VDC1-where-opaque, else VDC2, else backdrop).
-// The sprite mask is consulted only in modes 1 and 2 (Vdc2SpritesAboveVdc1Bg
-// and Vdc1SpritesBelowVdc2Bg), which Ghouls 'n Ghosts and most other dual-VDC
-// titles use heavily; without it those modes collapse to mode 0 and produce
-// visibly wrong layering. See Mesen2 Core/PCE/PceVpc.cpp:212-256 for the rules.
+// Using 0x00/0xFF lets the VPC mixer use the byte as a bitmask directly
+// (branchless: `color & flag | other & ~flag`), and the compiler can
+// process 4 pixels at a time via uint32 loads/stores. Profiling showed a
+// scalar bit-test (was 0x01) was burning ~4.4 ms/frame in the mixer; this
+// encoding cuts that to ~600 us.
+//
+// Sprite-vs-tile tracking (needed by VPC priority modes 1 and 2) was dropped
+// for speed. Both modes are rare in commercial SGX games; if a title misrenders
+// because of it, add a second `sgx_spr_vdc{1,2}` mask buffer and consult it
+// in the slow path only.
 // ============================================================================
 
 #define SGX_PX_DRAWN   0xFF
@@ -481,8 +484,6 @@ static uint8_t sgx_col_vdc1[XBUF_WIDTH] __attribute__((aligned(4)));
 static uint8_t sgx_col_vdc2[XBUF_WIDTH] __attribute__((aligned(4)));
 static uint8_t sgx_flg_vdc1[XBUF_WIDTH] __attribute__((aligned(4)));
 static uint8_t sgx_flg_vdc2[XBUF_WIDTH] __attribute__((aligned(4)));
-static uint8_t sgx_spr_vdc1[XBUF_WIDTH] __attribute__((aligned(4)));
-static uint8_t sgx_spr_vdc2[XBUF_WIDTH] __attribute__((aligned(4)));
 
 // Note: an earlier revision had a 256-entry SGX tile-cell cache here. Measuring
 // showed RP2350's hardware QMI/XIP cache (16 KB, 32-byte lines) already absorbs
@@ -503,7 +504,7 @@ static struct {
 // so the VPC port dispatcher in pce.c can update it.
 
 static void __not_in_flash_func(draw_tiles_sgx_line)(const vdc_ctx_t *ctx,
-	uint8_t *col, uint8_t *flg, uint8_t *spr, int Y, int scroll_x, int scroll_y)
+	uint8_t *col, uint8_t *flg, int Y, int scroll_x, int scroll_y)
 {
 	uint32_t _bg_w[] = { 32, 64, 128, 128 };
 	uint32_t _bg_h[] = { 32, 64 };
@@ -523,15 +524,6 @@ static void __not_in_flash_func(draw_tiles_sgx_line)(const vdc_ctx_t *ctx,
 		tile_x &= bg_w - 1;
 
 		int no = ctx->vram[tile_x + tile_y * bg_w];
-
-		// BAT=0 (tile #0) is essentially unusable on real PCE because tile
-		// #0's cell data lives at VRAM[0..15], overlapping BAT row 0. Games
-		// that leave middle BG rows at BAT=0 (Ghouls 'n Ghosts dungeon scene)
-		// would otherwise render the overlapping BAT bytes as colored
-		// garbage. Skipping tile #0 matches what Mesen2 produces visually
-		// for this title. SGX path only — non-SGX draw_tiles() stays as-is.
-		if ((no & 0x7FF) == 0) continue;
-
 		uint8_t *PAL = &PCE.Palette[(no >> 8) & 0x1F0];
 		const uint8_t *C = (const uint8_t *)(ctx->vram + (no & 0x7FF) * 16 + row_offset);
 
@@ -553,15 +545,11 @@ static void __not_in_flash_func(draw_tiles_sgx_line)(const vdc_ctx_t *ctx,
 		const int run_lo_fits = (dst0 >= 0 && dst0 + 4 <= XBUF_WIDTH);
 		const int run_hi_fits = (dst0 + 4 >= 0 && dst0 + 8 <= XBUF_WIDTH);
 
-		// Each emit clears spr too: a tile pixel here means any earlier
-		// back-sprite at the same X is now hidden behind the BG, so the
-		// VPC mode-1/2 mixer must see this pixel as "not a sprite".
 		#define EMIT(off, n_) do { \
 			int _dx = dst0 + (off); \
 			if ((unsigned)_dx < XBUF_WIDTH) { \
 				col[_dx] = PAL[(L >> ((n_) * 4)) & 15]; \
 				flg[_dx] = SGX_PX_DRAWN; \
-				spr[_dx] = 0; \
 			} \
 		} while (0)
 
@@ -573,7 +561,6 @@ static void __not_in_flash_func(draw_tiles_sgx_line)(const vdc_ctx_t *ctx,
 			           | ((uint32_t)PAL[(L >> 28) & 0xF] << 24);
 			*(uint32_t *)(col + dst0)     = v;
 			*(uint32_t *)(flg + dst0)     = 0xFFFFFFFFu;
-			*(uint32_t *)(spr + dst0)     = 0;
 		} else {
 			if (J & 0x80) EMIT(0, 1);
 			if (J & 0x40) EMIT(1, 3);
@@ -589,7 +576,6 @@ static void __not_in_flash_func(draw_tiles_sgx_line)(const vdc_ctx_t *ctx,
 			           | ((uint32_t)PAL[(L >> 24) & 0xF] << 24);
 			*(uint32_t *)(col + dst0 + 4) = v;
 			*(uint32_t *)(flg + dst0 + 4) = 0xFFFFFFFFu;
-			*(uint32_t *)(spr + dst0 + 4) = 0;
 		} else {
 			if (J & 0x08) EMIT(4, 0);
 			if (J & 0x04) EMIT(5, 2);
@@ -601,11 +587,11 @@ static void __not_in_flash_func(draw_tiles_sgx_line)(const vdc_ctx_t *ctx,
 	}
 }
 
-// Render a single sprite cell (up to 16 wide, `height` rows) into the
-// (col, flg, spr) line buffers starting at horizontal offset 'x'. 'C' is the
-// source row (16-bit planes). Both flg and spr are set to pal_flag (0xFF) for
-// each opaque sprite pixel — the spr mask is what VPC modes 1 and 2 consult.
-static void __not_in_flash_func(draw_sprite_sgx_cell)(uint8_t *col, uint8_t *flg, uint8_t *spr,
+// Render a single sprite cell (up to 16 wide, `height` rows) into the (col, flg)
+// line buffer starting at horizontal offset 'x'. 'C' is the source row (16-bit
+// planes). Used for VDC2 — VDC1 still goes through the original draw_sprite()
+// when SGX is off.
+static void __not_in_flash_func(draw_sprite_sgx_cell)(uint8_t *col, uint8_t *flg,
 	int x, const uint16_t *C, uint32_t attr, uint8_t pal_flag)
 {
 	uint8_t *PAL = &PCE.Palette[256 + ((attr & 0xF) << 4)];
@@ -636,7 +622,6 @@ static void __not_in_flash_func(draw_sprite_sgx_cell)(uint8_t *col, uint8_t *flg
 			if ((unsigned)_dx < XBUF_WIDTH) { \
 				col[_dx] = PAL[(L_ >> ((n_) * 4)) & 15]; \
 				flg[_dx] = pal_flag; \
-				spr[_dx] = pal_flag; \
 			} \
 		} \
 	} while (0)
@@ -653,7 +638,6 @@ static void __not_in_flash_func(draw_sprite_sgx_cell)(uint8_t *col, uint8_t *flg
 			            | ((uint32_t)PAL[((L_) >> ((n3) * 4)) & 15] << 24); \
 			*(uint32_t *)(col + _dx) = _v; \
 			*(uint32_t *)(flg + _dx) = flg4; \
-			*(uint32_t *)(spr + _dx) = flg4; \
 		} else { \
 			EMIT((quad_off) + 0, b0, L_, np0); \
 			EMIT((quad_off) + 1, b1, L_, np1); \
@@ -679,8 +663,7 @@ static void __not_in_flash_func(draw_sprite_sgx_cell)(uint8_t *col, uint8_t *flg
 }
 
 static void __not_in_flash_func(draw_sprites_sgx_line)(const vdc_ctx_t *ctx,
-	const uint64_t *bitmask_per_line, uint8_t *col, uint8_t *flg, uint8_t *spr_mask,
-	int Y, int priority)
+	const uint64_t *bitmask_per_line, uint8_t *col, uint8_t *flg, int Y, int priority)
 {
 	if (Y < 0 || Y >= XBUF_HEIGHT) return;
 	uint64_t bitmask = bitmask_per_line[Y];
@@ -716,7 +699,7 @@ static void __not_in_flash_func(draw_sprites_sgx_line)(const vdc_ctx_t *ctx,
 
 		for (int j = 0; j <= cgx; j++) {
 			int cell_x = (attr & H_FLIP) ? (cgx - j) : j;
-			draw_sprite_sgx_cell(col, flg, spr_mask, x + cell_x * 16, C_row + j * 64, attr, SGX_PX_DRAWN);
+			draw_sprite_sgx_cell(col, flg, x + cell_x * 16, C_row + j * 64, attr, SGX_PX_DRAWN);
 		}
 	}
 }
@@ -724,17 +707,11 @@ static void __not_in_flash_func(draw_sprites_sgx_line)(const vdc_ctx_t *ctx,
 // Vectorized mix of one contiguous segment [start, end) under a single VPC cfg.
 // Buffers are 4-byte aligned; the segment head/tail handle pixels not on a
 // uint32 boundary (only when a VPC window splits mid-word — rare but legal).
-//
-// Priority mode (cfg bits 2-3), per Mesen2 PceVpc.cpp:212-256:
-//   0,3 = Default                  : VDC1 where opaque, else VDC2.
-//   1   = Vdc2SpritesAboveVdc1Bg   : VDC2 also wins where (VDC2 sprite) AND (VDC1 not sprite).
-//   2   = Vdc1SpritesBelowVdc2Bg   : VDC2 also wins where (VDC1 sprite) AND (VDC2 not sprite) AND (VDC2 opaque).
 static inline void __not_in_flash_func(mix_segment)(uint8_t *out, int start, int end,
 	uint8_t cfg, uint32_t bd_4, uint8_t backdrop)
 {
 	const int v1_en = cfg & 0x01;
 	const int v2_en = cfg & 0x02;
-	const int mode  = (cfg >> 2) & 3;
 	const int width = end - start;
 	if (width <= 0) return;
 
@@ -753,64 +730,23 @@ static inline void __not_in_flash_func(mix_segment)(uint8_t *out, int start, int
 	#define SCALAR_PX(i_) do { \
 		uint8_t f1 = sgx_flg_vdc1[(i_)]; \
 		uint8_t f2 = sgx_flg_vdc2[(i_)]; \
-		uint8_t s1 = sgx_spr_vdc1[(i_)]; \
-		uint8_t s2 = sgx_spr_vdc2[(i_)]; \
 		uint8_t r; \
-		uint8_t vdc2_pick = f2 ? sgx_col_vdc2[(i_)] : backdrop; \
-		if (!v1_en)             r = (v2_en && f2) ? sgx_col_vdc2[(i_)] : backdrop; \
-		else if (!v2_en)        r = f1 ? sgx_col_vdc1[(i_)] : backdrop; \
-		else if (mode == 1) { \
-			if (!f1 || (s2 && !s1))     r = vdc2_pick; \
-			else                        r = sgx_col_vdc1[(i_)]; \
-		} else if (mode == 2) { \
-			if (!f1 || (s1 && !s2 && f2)) r = vdc2_pick; \
-			else                          r = sgx_col_vdc1[(i_)]; \
-		} else { \
-			if (f1)                       r = sgx_col_vdc1[(i_)]; \
-			else                          r = vdc2_pick; \
-		} \
+		if (v1_en && f1)        r = sgx_col_vdc1[(i_)]; \
+		else if (v2_en && f2)   r = sgx_col_vdc2[(i_)]; \
+		else                    r = backdrop; \
 		out[(i_)] = r; \
 	} while (0)
 
 	for (int i = start; i < aligned_start; i++) SCALAR_PX(i);
 
 	if (v1_en && v2_en) {
-		if (mode == 1) {
-			// pick2_mask = ~f1 | (s2 & ~s1)
-			for (int i = aligned_start; i < aligned_end; i += 4) {
-				uint32_t f1 = *(uint32_t *)(sgx_flg_vdc1 + i);
-				uint32_t c1 = *(uint32_t *)(sgx_col_vdc1 + i);
-				uint32_t f2 = *(uint32_t *)(sgx_flg_vdc2 + i);
-				uint32_t c2 = *(uint32_t *)(sgx_col_vdc2 + i);
-				uint32_t s1 = *(uint32_t *)(sgx_spr_vdc1 + i);
-				uint32_t s2 = *(uint32_t *)(sgx_spr_vdc2 + i);
-				uint32_t v2 = (c2 & f2) | (~f2 & bd_4);
-				uint32_t pick2 = (~f1) | (s2 & ~s1);
-				*(uint32_t *)(out + i) = (v2 & pick2) | (c1 & ~pick2);
-			}
-		} else if (mode == 2) {
-			// pick2_mask = ~f1 | (s1 & ~s2 & f2)
-			for (int i = aligned_start; i < aligned_end; i += 4) {
-				uint32_t f1 = *(uint32_t *)(sgx_flg_vdc1 + i);
-				uint32_t c1 = *(uint32_t *)(sgx_col_vdc1 + i);
-				uint32_t f2 = *(uint32_t *)(sgx_flg_vdc2 + i);
-				uint32_t c2 = *(uint32_t *)(sgx_col_vdc2 + i);
-				uint32_t s1 = *(uint32_t *)(sgx_spr_vdc1 + i);
-				uint32_t s2 = *(uint32_t *)(sgx_spr_vdc2 + i);
-				uint32_t v2 = (c2 & f2) | (~f2 & bd_4);
-				uint32_t pick2 = (~f1) | (s1 & ~s2 & f2);
-				*(uint32_t *)(out + i) = (v2 & pick2) | (c1 & ~pick2);
-			}
-		} else {
-			// Default (modes 0 and 3): VDC1 where opaque, else VDC2, else backdrop.
-			for (int i = aligned_start; i < aligned_end; i += 4) {
-				uint32_t f1 = *(uint32_t *)(sgx_flg_vdc1 + i);
-				uint32_t c1 = *(uint32_t *)(sgx_col_vdc1 + i);
-				uint32_t f2 = *(uint32_t *)(sgx_flg_vdc2 + i);
-				uint32_t c2 = *(uint32_t *)(sgx_col_vdc2 + i);
-				uint32_t pick2 = (c2 & f2) | (~f2 & bd_4);
-				*(uint32_t *)(out + i) = (c1 & f1) | (~f1 & pick2);
-			}
+		for (int i = aligned_start; i < aligned_end; i += 4) {
+			uint32_t f1 = *(uint32_t *)(sgx_flg_vdc1 + i);
+			uint32_t c1 = *(uint32_t *)(sgx_col_vdc1 + i);
+			uint32_t f2 = *(uint32_t *)(sgx_flg_vdc2 + i);
+			uint32_t c2 = *(uint32_t *)(sgx_col_vdc2 + i);
+			uint32_t pick2 = (c2 & f2) | (~f2 & bd_4);
+			*(uint32_t *)(out + i) = (c1 & f1) | (~f1 & pick2);
 		}
 	} else if (v1_en) {
 		for (int i = aligned_start; i < aligned_end; i += 4) {
@@ -835,8 +771,9 @@ static inline void __not_in_flash_func(mix_segment)(uint8_t *out, int start, int
 // region index: 0=NoWindow, 1=Window1, 2=Window2, 3=Both.
 //
 // Strategy: split the scanline at w1/w2 boundaries into at most 3 contiguous
-// segments. Each segment sees a single cfg and runs a vectorized uint32 path
-// chosen by mode at the segment level (the inner per-uint32 loop is straight).
+// segments. Each segment sees a single cfg and runs the vectorized fast path
+// (uint32 byte-mask). Sprite-vs-tile tracking was dropped: priority modes 1
+// and 2 collapse to default (mode 0).
 static void __not_in_flash_func(mix_vpc_scanline)(uint8_t *out, int width)
 {
 	const uint8_t  backdrop = PCE.Palette[0];
@@ -893,19 +830,17 @@ static void __not_in_flash_func(render_lines_sgx)(int min_line, int max_line)
 #endif
 		memset(sgx_flg_vdc1, 0, mix_width);
 		memset(sgx_flg_vdc2, 0, mix_width);
-		memset(sgx_spr_vdc1, 0, mix_width);
-		memset(sgx_spr_vdc2, 0, mix_width);
 #if SGX_PROFILE
 		uint32_t t1 = time_us_32();
 #endif
 
 		// VDC1
 		if (vdc1_active & 0x40)
-			draw_sprites_sgx_line(VDC1_CTX, sprite_bitmask_per_line, sgx_col_vdc1, sgx_flg_vdc1, sgx_spr_vdc1, y, 0);
+			draw_sprites_sgx_line(VDC1_CTX, sprite_bitmask_per_line, sgx_col_vdc1, sgx_flg_vdc1, y, 0);
 		if (vdc1_active & 0x80)
-			draw_tiles_sgx_line(VDC1_CTX, sgx_col_vdc1, sgx_flg_vdc1, sgx_spr_vdc1, y, gfx_context.scroll_x, gfx_context.scroll_y);
+			draw_tiles_sgx_line(VDC1_CTX, sgx_col_vdc1, sgx_flg_vdc1, y, gfx_context.scroll_x, gfx_context.scroll_y);
 		if (vdc1_active & 0x40)
-			draw_sprites_sgx_line(VDC1_CTX, sprite_bitmask_per_line, sgx_col_vdc1, sgx_flg_vdc1, sgx_spr_vdc1, y, 1);
+			draw_sprites_sgx_line(VDC1_CTX, sprite_bitmask_per_line, sgx_col_vdc1, sgx_flg_vdc1, y, 1);
 #if SGX_PROFILE
 		uint32_t t2 = time_us_32();
 #endif
@@ -913,11 +848,11 @@ static void __not_in_flash_func(render_lines_sgx)(int min_line, int max_line)
 		// VDC2 — completely skip when CR has both background and sprite disabled.
 		if (vdc2_active) {
 			if (vdc2_active & 0x40)
-				draw_sprites_sgx_line(&vdc2_ctx, sprite_bitmask_per_line_vdc2, sgx_col_vdc2, sgx_flg_vdc2, sgx_spr_vdc2, y, 0);
+				draw_sprites_sgx_line(&vdc2_ctx, sprite_bitmask_per_line_vdc2, sgx_col_vdc2, sgx_flg_vdc2, y, 0);
 			if (vdc2_active & 0x80)
-				draw_tiles_sgx_line(&vdc2_ctx, sgx_col_vdc2, sgx_flg_vdc2, sgx_spr_vdc2, y, gfx_context_vdc2.scroll_x, gfx_context_vdc2.scroll_y);
+				draw_tiles_sgx_line(&vdc2_ctx, sgx_col_vdc2, sgx_flg_vdc2, y, gfx_context_vdc2.scroll_x, gfx_context_vdc2.scroll_y);
 			if (vdc2_active & 0x40)
-				draw_sprites_sgx_line(&vdc2_ctx, sprite_bitmask_per_line_vdc2, sgx_col_vdc2, sgx_flg_vdc2, sgx_spr_vdc2, y, 1);
+				draw_sprites_sgx_line(&vdc2_ctx, sprite_bitmask_per_line_vdc2, sgx_col_vdc2, sgx_flg_vdc2, y, 1);
 		}
 #if SGX_PROFILE
 		uint32_t t3 = time_us_32();
@@ -1207,15 +1142,6 @@ void __not_in_flash_func(gfx_run)(void)
 		// Trigger interrupts
 		if (SpHitON && sprite_hit_check(VDC1_CTX)) {
 			gfx_irq(VDC_STAT_CR);
-		}
-		// VDC2 sprite-0 collision. Status bit + IRQ enqueue follow the same
-		// pattern as the existing VDC2 SATB / raster paths above.
-		if (PCE.VPC.is_sgx && (PCE.VDC2.regs[CR].W & 0x01)) {
-			vdc_ctx_t v2 = { PCE.VDC2.regs, PCE.VRAM2, PCE.SPRAM2 };
-			if (sprite_hit_check(&v2)) {
-				PCE.VDC2.pending_irqs <<= 4;
-				PCE.VDC2.pending_irqs |= VDC_STAT_CR & 0xF;
-			}
 		}
 		// VBlank status bit is always set (hardware flag) — the BIOS
 		// polls $0000 for VBlank with IRQs disabled during screen

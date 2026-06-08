@@ -199,11 +199,6 @@ void __not_in_flash_func(pce_run)(void)
 		PCE.VDC.screen_height = IO_VDC_SCREEN_HEIGHT;
 		PCE.VDC.mode_chg = 0;
 	}
-	if (PCE.VPC.is_sgx && PCE.VDC2.mode_chg) {
-		PCE.VDC2.screen_width  = (PCE.VDC2.regs[HDR].B.l + 1) * 8;
-		PCE.VDC2.screen_height =  PCE.VDC2.regs[VDW].W + 1;
-		PCE.VDC2.mode_chg = 0;
-	}
 	// Emulate!
 	for (PCE.Scanline = 0; PCE.Scanline < 263; ++PCE.Scanline) {
 		PCE.MaxCycles += PCE.Timer.cycles_per_line;
@@ -343,14 +338,8 @@ static inline void __not_in_flash_func(vdc_io_write)(vdc_t *vdc, uint16_t *vram,
 				gfx_latch_context(0);
 				PCE.ScrollYDiff = PCE.Scanline - 1 - VR_MINLINE;
 			} else {
-				int vdc2_minline = PCE.VDC2.regs[VPR].B.h + PCE.VDC2.regs[VPR].B.l;
-				// Mesen2's BYR update is pending until the NEXT scanline's
-				// LatchScrollY, so the offset to absorb is (S+1)-minline.
-				// Clamped to 0 for VBlank writes so scroll_y == BYR at the
-				// first visible line.
-				int d = PCE.Scanline + 1 - vdc2_minline;
-				PCE.VPC.scroll_y_diff_vdc2 = (d < 0) ? 0 : d;
 				gfx_latch_context_vdc2(0);
+				PCE.VPC.scroll_y_diff_vdc2 = PCE.Scanline - 1 - VR_MINLINE;
 			}
 			break;
 
@@ -419,9 +408,7 @@ static inline void __not_in_flash_func(vdc_io_write)(vdc_t *vdc, uint16_t *vram,
 						VR(VPR).B.h, VR(VPR).B.l);
 				}
 			} else {
-				int vdc2_minline = PCE.VDC2.regs[VPR].B.h + PCE.VDC2.regs[VPR].B.l;
-				int d = PCE.Scanline + 1 - vdc2_minline;
-				PCE.VPC.scroll_y_diff_vdc2 = (d < 0) ? 0 : d;
+				PCE.VPC.scroll_y_diff_vdc2 = PCE.Scanline - 1 - VR_MINLINE;
 			}
 			break;
 
@@ -500,11 +487,11 @@ uint8_t __not_in_flash_func(pce_readIO)(uint16_t A)
 	case 0x0000:                /* VDC / VPC (SuperGrafx) */
 		if (PCE.VPC.is_sgx) {
 			uint8_t port = A & 0x1F;
-			if (port < 8) {
+			if (port < 4) {
 				vdc_t *vdc = PCE.VPC.st_to_vdc2 ? &PCE.VDC2 : &PCE.VDC;
 				uint16_t *vram = PCE.VPC.st_to_vdc2 ? PCE.VRAM2 : PCE.VRAM;
-				ret = vdc_io_read(vdc, vram, port & 3);
-			} else if (port >= 0x10 && port <= 0x17) {
+				ret = vdc_io_read(vdc, vram, port);
+			} else if (port >= 0x10 && port <= 0x13) {
 				ret = vdc_io_read(&PCE.VDC2, PCE.VRAM2, port & 3);
 			} else if (port == 0x08) {
 				ret = PCE.VPC.priority1;
@@ -635,15 +622,11 @@ void __not_in_flash_func(pce_writeIO)(uint16_t A, uint8_t V)
 	case 0x0000:                /* VDC / VPC (SuperGrafx) */
 		if (PCE.VPC.is_sgx) {
 			uint8_t port = A & 0x1F;
-			// $00-$07: VDC accessed via ST register routing (PCE port-mirror
-			// behaviour preserved across $04-$07, matching Mesen2 which
-			// likewise treats the high bits of the port nibble as don't-care).
-			if (port < 8) {
+			if (port < 4) {
 				vdc_t *vdc = PCE.VPC.st_to_vdc2 ? &PCE.VDC2 : &PCE.VDC;
 				uint16_t *vram = PCE.VPC.st_to_vdc2 ? PCE.VRAM2 : PCE.VRAM;
-				vdc_io_write(vdc, vram, port & 3, V, !PCE.VPC.st_to_vdc2);
-			} else if (port >= 0x10 && port <= 0x17) {
-				// $10-$17: direct VDC2 access, with $14-$17 mirroring $10-$13.
+				vdc_io_write(vdc, vram, port, V, !PCE.VPC.st_to_vdc2);
+			} else if (port >= 0x10 && port <= 0x13) {
 				vdc_io_write(&PCE.VDC2, PCE.VRAM2, port & 3, V, 0);
 			} else if (port == 0x08) {
 				// Priority1: low nib = Both window, high nib = Window2
