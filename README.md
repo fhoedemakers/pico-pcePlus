@@ -90,8 +90,20 @@ CD-ROM² games require a System Card BIOS to boot. You must provide your own BIO
 ### Installation
 
 1. Create a `/bios/` folder in the root of your SD card
-2. Place one or more BIOS files (with `.pce` extension) in the `/bios/` folder
+2. Place one or more BIOS files (with a `.pce` extension, or named `cd_bios.rom`) in the `/bios/` folder
 3. The emulator will automatically scan this folder, identify the BIOS by its CRC32 checksum, and select the best available one
+
+### Per-game BIOS override
+
+The emulator also looks for a BIOS in the **same folder as the CUE/BIN or CHD file** of the game you are launching. If a `.pce` file (or a file named `cd_bios.rom`) is found next to the disc image, it is loaded **instead of** the BIOS in `/bios/`. The `/bios/` folder is only used as a fallback when the disc folder contains no usable BIOS.
+
+This is useful for:
+
+- Running a specific region's BIOS for a single game without changing your default
+- Shipping a game patch that depends on a particular System Card version
+- Keeping unmodified game folders self-contained on the SD card
+
+CRC32 detection still applies in the per-game folder, so the variant (System Card 1.x/2.x/3.0, Arcade Card Duo/Pro, Games Express, US/JP region) is selected automatically.
 
 ### Supported BIOS Files
 
@@ -159,6 +171,54 @@ Depending on the hardware configuration, the emulator supports these game contro
 - Wii Classic Controller (via I2C)
 
 ***
+
+## In-Game Hotkeys
+
+The emulator reacts to button combinations on controller 1 during gameplay. The combinations use the PC Engine controller's **SELECT** and **RUN** buttons together with the directional pad or action buttons.
+
+### SELECT + …
+
+| Combo | Action |
+|---|---|
+| SELECT + RUN | Open the in-game settings menu |
+| SELECT + UP / DOWN | Cycle screen mode (1:1 ↔ 8:7, scanlines on/off) on DVI boards; toggle scanlines on HSTX boards |
+| SELECT + LEFT | Toggle external (I²S) audio output (DVI boards only) |
+| SELECT + RIGHT | Toggle the VU meter LEDs (boards that support it) |
+
+### RUN + …
+
+| Combo | Action |
+|---|---|
+| RUN + A | Toggle the on-screen FPS overlay |
+| RUN + B | Start recording in-game audio to a WAV file on the SD card (requires PSRAM) |
+| RUN + UP | Quick-load a save state |
+| RUN + DOWN | Quick-save a save state |
+| RUN + LEFT / RIGHT | Adjust output volume (Adafruit Fruit Jam only) |
+
+***
+
+## Save States and Backup RAM
+
+- **Save states** – Manual save/load slots are available for any game through the in-game menu or via the **RUN + UP/DOWN** hotkeys. Save state files are stored on the SD card under `/savestates/PCE/<CRC32>/`.
+- **Auto-save state** – When enabled in the settings menu, the emulator automatically saves a state when you exit a game and offers to resume it the next time the same ROM is launched.
+- **CD-ROM² Backup RAM (BRAM)** – CD-ROM² games that use the System Card's BRAM (e.g. to save progress) get their BRAM persisted automatically. The file is written to `/savestates/PCE/<CRC32>/bram.sav` when the game exits, and reloaded the next time the same disc image is launched.
+
+***
+
+## Audio Recording
+
+On boards with PSRAM, the emulator can record the live audio output to a `.wav` file on the SD card. Press **RUN + B** during gameplay to start a recording; the file is finalised when the recording is stopped or the game exits. This is useful for capturing soundtracks, BGM, or evidence of an emulation issue.
+
+***
+
+## Performance and CD-ROM² Frame Pacing
+
+- The emulator targets a steady **60 fps** for HuCard games.
+- For CD-ROM² games, an **adaptive frame-skip** kicks in when the SoC cannot finish a frame in time (typically during heavy CD streaming). The skip is limited so that video never drops below **30 fps**, and the emulator never skips two frames in a row, keeping motion smooth even on busy scenes.
+- HSTX boards run the video output in a streamed mode that frees more time for CD audio and ADPCM mixing — this is one of the reasons HSTX is preferred for CD-ROM² and SuperGrafx titles.
+
+***
+
 
 ## Building from Source
 
