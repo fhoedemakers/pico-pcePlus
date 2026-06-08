@@ -987,6 +987,18 @@ void __not_in_flash_func(gfx_latch_context_vdc2)(int force)
 	}
 }
 
+// Per-scanline scroll-only latch for VDC2. Re-reads BXR/BYR so VDC2 stays in
+// scroll-sync with VDC1 (which gets force-latched per scanline in gfx_run),
+// but deliberately skips CR so brief mid-frame BG/sprite-enable toggles the
+// game performs don't make VDC2 BG flicker on/off scanline-by-scanline.
+void __not_in_flash_func(gfx_latch_scroll_vdc2)(void)
+{
+	if (!PCE.VPC.is_sgx) return;
+	gfx_context_vdc2.scroll_x = PCE.VDC2.regs[BXR].W;
+	gfx_context_vdc2.scroll_y = PCE.VDC2.regs[BYR].W - PCE.VPC.scroll_y_diff_vdc2;
+	gfx_context_vdc2.latched  = 1;
+}
+
 
 /*
 	Render lines into the buffer from min_line to max_line (inclusive)
@@ -1184,6 +1196,12 @@ void __not_in_flash_func(gfx_run)(void)
 				last_line_counter = line_counter;
 			}
 			gfx_latch_context(1);
+			// Scroll-only re-latch for VDC2 per scanline. Keeps VDC2 BG
+			// scroll-sync'd with VDC1 (matching their scroll_y_diff cadence)
+			// without re-reading CR — re-reading CR every scanline would
+			// pick up brief mid-frame BG-enable toggles and make VDC2 BG
+			// flicker on/off (Ghouls 'n Ghosts vertical-scroll demo).
+			if (PCE.VPC.is_sgx) gfx_latch_scroll_vdc2();
 			osd_gfx_render_line = line_counter;
 			render_lines(line_counter, line_counter + 1);
 			line_counter++;

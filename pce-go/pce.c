@@ -343,13 +343,12 @@ static inline void __not_in_flash_func(vdc_io_write)(vdc_t *vdc, uint16_t *vram,
 				gfx_latch_context(0);
 				PCE.ScrollYDiff = PCE.Scanline - 1 - VR_MINLINE;
 			} else {
+				// Match VDC1's formula exactly so both VDCs share the same
+				// "scroll-Y reference frame" — any constant offset relative
+				// to Mesen2 then applies uniformly and the two BG layers
+				// scroll in lockstep with the player sprite.
 				int vdc2_minline = PCE.VDC2.regs[VPR].B.h + PCE.VDC2.regs[VPR].B.l;
-				// Mesen2's BYR update is pending until the NEXT scanline's
-				// LatchScrollY, so the offset to absorb is (S+1)-minline.
-				// Clamped to 0 for VBlank writes so scroll_y == BYR at the
-				// first visible line.
-				int d = PCE.Scanline + 1 - vdc2_minline;
-				PCE.VPC.scroll_y_diff_vdc2 = (d < 0) ? 0 : d;
+				PCE.VPC.scroll_y_diff_vdc2 = PCE.Scanline - 1 - vdc2_minline;
 				gfx_latch_context_vdc2(0);
 			}
 			break;
@@ -420,8 +419,7 @@ static inline void __not_in_flash_func(vdc_io_write)(vdc_t *vdc, uint16_t *vram,
 				}
 			} else {
 				int vdc2_minline = PCE.VDC2.regs[VPR].B.h + PCE.VDC2.regs[VPR].B.l;
-				int d = PCE.Scanline + 1 - vdc2_minline;
-				PCE.VPC.scroll_y_diff_vdc2 = (d < 0) ? 0 : d;
+				PCE.VPC.scroll_y_diff_vdc2 = PCE.Scanline - 1 - vdc2_minline;
 			}
 			break;
 
