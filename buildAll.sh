@@ -15,14 +15,12 @@ then
 	exit 1
 fi
 # check if risc-v toolchain is installed
-if [ ! -d $PICO_SDK_PATH/toolchain/RISCV_RPI_2_0_0_2/bin ] ; then
-	echo "RISC-V toolchain not found in $PICO_SDK_PATH/toolchain/RISCV_RPI_2_0_0_2/bin"	
-	echo "To install the RISC-V toolchain, execute \"bld.sh -h\" for instructions"
-	exit 1
-fi
-# build for Pico 2 (w) -arm-s
-# No pico2_w binaries for HWConfig 1 (#132)
-# no pico_w binaries for HWConfig 2 (#136)
+# if [ ! -d $PICO_SDK_PATH/toolchain/RISCV_RPI_2_0_0_2/bin ] ; then
+# 	echo "RISC-V toolchain not found in $PICO_SDK_PATH/toolchain/RISCV_RPI_2_0_0_2/bin"	
+# 	echo "To install the RISC-V toolchain, execute \"bld.sh -h\" for instructions"
+# 	exit 1
+# fi
+# build for Pico 2 -arm-s
 HWCONFIGS="1 2 5 6 7 8 9 10 12 13 14"
 for HWCONFIG in $HWCONFIGS
 do
