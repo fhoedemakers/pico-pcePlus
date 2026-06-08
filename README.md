@@ -19,7 +19,7 @@ This project is part of a family of Raspberry Pi Pico emulator projects:
 ## What it emulates
 
 - **HuCard ROMs** — Standard PC Engine / TurboGrafx-16 cartridge dumps (`.pce`) are loaded directly from the SD card.
-- **SuperGrafx (SGX)** — SuperGrafx titles are recognised and dispatched to the second VDC. SuperGrafx support requires PSRAM. SGX emulation is **still under development**: a number of titles exhibit graphical glitches (for example background corruption in certain games) and not all SuperGrafx games are fully playable.
+- **SuperGrafx (SGX)** — SuperGrafx titles are recognised and dispatched to the second VDC. SuperGrafx support requires PSRAM. SGX emulation is **still under development**: titles exhibit graphical glitches (for example background corruption in Ghouls 'n Ghosts).
 - **CD-ROM²** — CD-ROM² and Super CD-ROM² games are supported, including CD-DA audio playback and ADPCM streaming. CD-ROM² playback requires PSRAM and a System Card BIOS supplied by the user.
 - **Save states** — Manual save and load slots are available through the in-game menu. An optional auto-save mode stores a state when the game exits and offers to resume it the next time the same ROM is launched. State files are stored on the SD card under `/savestates/PCE/<CRC32>/`.
 - **Backup RAM (BRAM)** — CD-ROM² games that use the System Card's BRAM (for in-game save data) have it persisted automatically alongside the save states.
@@ -159,4 +159,4 @@ This project is licensed under the GNU General Public License v3.0. See the [LIC
 
 ### Contributions and assistance
 
-- [Anthropic Claude (Opus 4.6 and 4.7)](https://www.anthropic.com/claude/opus) assisted with the PSG sample-accurate rewrite, the ADPCM decoder port, CHD integration, SuperGrafx work, and general bug fixes.
+- [Anthropic Claude (Opus 4.6 and 4.7)](https://www.anthropic.com/claude/opus) assisted with the PSG rewrite, the ADPCM decoder port, CHD integration, SuperGrafx work, and general bug fixes.
