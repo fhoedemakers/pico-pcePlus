@@ -123,6 +123,9 @@ pce_init(void)
 		return -1;
 	}
 
+	// SGX-only handle to the upper 24 KB of WRAM (banks F9-FB). NULL in PCE mode.
+	PCE.RAM_EXT = PCE.VPC.is_sgx ? (PCE.RAM + 0x2000) : NULL;
+
 	// VRAM/SPRAM/VDC.regs storage now exists — point gfx.c's VDC1 context
 	// at it. (gfx_init() runs before pce_init() in InitPCE so it can't bind.)
 	gfx_bind_vdc1();
@@ -169,6 +172,7 @@ pce_term(void)
 
 	free(PCE.RAM);
 	PCE.RAM = NULL;
+	PCE.RAM_EXT = NULL;
 	free(PCE.VRAM);
 	PCE.VRAM = NULL;
 	if (PCE.VRAM2) {

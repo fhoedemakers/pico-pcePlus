@@ -134,8 +134,13 @@ typedef struct {
 } psg_chan_t;
 
 typedef struct {
-	// Main memory
-	uint8_t *RAM; // [0x2000]
+	// Main memory (8 KB on PC Engine, 32 KB on SuperGrafx mapped at banks F8-FB).
+	uint8_t *RAM; // [0x2000] or [0x8000]
+
+	// SuperGrafx: pointer to bytes 0x2000..0x7FFF of PCE.RAM (banks F9-FB).
+	// Same allocation as PCE.RAM, just offset; gives the save-state machinery
+	// a clean handle for the SGX-only WRAM extension via SVAR_P. NULL in PCE mode.
+	uint8_t *RAM_EXT;
 
 	// Video RAM
 	uint16_t *VRAM; // [0x8000]

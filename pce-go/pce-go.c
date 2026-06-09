@@ -70,6 +70,29 @@ save_var_t SaveStateVars[] =
 	SVAR_END
 };
 
+// SuperGrafx state — written only when PCE.VPC.is_sgx, read by LoadState as a
+// fallback lookup. PCE saves don't carry these keys and load fine; SGX saves
+// carry both lists and so do SGX boots.
+save_var_t SgxSaveStateVars[] =
+{
+	SVAR_P("VRAM2", PCE.VRAM2, 0x10000),
+	SVAR_N("SPRAM2", PCE.SPRAM2, 512),
+	SVAR_P("RAMEXT", PCE.RAM_EXT, 0x6000),
+
+	// VDC2
+	SVAR_A("VDC2.regs", PCE.VDC2.regs),         SVAR_1("VDC2.reg", PCE.VDC2.reg),
+	SVAR_1("VDC2.status", PCE.VDC2.status),     SVAR_1("VDC2.satb", PCE.VDC2.satb),
+	SVAR_4("VDC2.irqs", PCE.VDC2.pending_irqs), SVAR_1("VDC2.vram", PCE.VDC2.vram),
+
+	// VPC
+	SVAR_1("VPC.pri1", PCE.VPC.priority1),       SVAR_1("VPC.pri2", PCE.VPC.priority2),
+	SVAR_2("VPC.wnd1", PCE.VPC.window1),         SVAR_2("VPC.wnd2", PCE.VPC.window2),
+	SVAR_1("VPC.st",   PCE.VPC.st_to_vdc2),      SVAR_A("VPC.wcfg", PCE.VPC.window_cfg),
+	SVAR_4("VPC.sydf", PCE.VPC.scroll_y_diff_vdc2),
+
+	SVAR_END
+};
+
 #define TWO_PART_ROM 0x0001
 #define ONBOARD_RAM  0x0100
 #define US_ENCODED   0x0010
@@ -522,15 +545,26 @@ LoadState(const char *name)
 		goto _cleanup;
 	}
 
+	// Search both the PCE and SGX var tables. PCE saves only carry PCE keys
+	// (SGX entries silently skipped); SGX saves carry both lists.
+	save_var_t *var_lists[] = { SaveStateVars, SgxSaveStateVars };
+
 	while (fread(&block, sizeof(block), 1, fp))
 	{
 		size_t block_end = ftell(fp) + block.len;
 
-		for (save_var_t *var = SaveStateVars; var->ptr; var++)
+		for (int list_idx = 0; list_idx < 2; list_idx++)
 		{
-			if (strncmp(var->desc.key, block.key, 12) == 0)
+			save_var_t *list = var_lists[list_idx];
+			bool matched = false;
+			for (save_var_t *var = list; var->ptr; var++)
 			{
+				if (strncmp(var->desc.key, block.key, 12) != 0)
+					continue;
 				void *ptr = var->desc.type == 5 ? *((void**)var->ptr) : var->ptr;
+				// SGX entry whose target pointer is NULL (e.g. loading a save
+				// from an SGX game while running in PCE mode) — skip cleanly.
+				if (!ptr) { matched = true; break; }
 				size_t len = MIN((size_t)var->desc.len, (size_t)block.len);
 				if (!fread(ptr, len, 1, fp))
 				{
@@ -539,11 +573,13 @@ LoadState(const char *name)
 				}
 				if (len < var->desc.len)
 				{
-					memset(ptr + len, 0, var->desc.len - len);
+					memset((uint8_t *)ptr + len, 0, var->desc.len - len);
 				}
 				MESSAGE_INFO("Loaded %s\n", var->desc.key);
+				matched = true;
 				break;
 			}
+			if (matched) break;
 		}
 		fseek(fp, block_end, SEEK_SET);
 	}
@@ -578,21 +614,32 @@ SaveState(const char *name)
 
 	fwrite(SAVESTATE_HEADER, sizeof(SAVESTATE_HEADER), 1, fp);
 
-	for (save_var_t *var = SaveStateVars; var->ptr; var++)
+	// PCE list is always written. SGX list is appended only when running SGX
+	// — keeps PCE/CD save files identical to before this change.
+	save_var_t *var_lists[] = { SaveStateVars, NULL };
+	if (PCE.VPC.is_sgx) var_lists[1] = SgxSaveStateVars;
+
+	for (int list_idx = 0; list_idx < 2; list_idx++)
 	{
-		void *ptr = var->desc.type == 5 ? *((void**)var->ptr) : var->ptr;
-		size_t len = var->desc.len;
-		if (!fwrite(&var->desc, sizeof(var->desc), 1, fp))
+		save_var_t *list = var_lists[list_idx];
+		if (!list) continue;
+		for (save_var_t *var = list; var->ptr; var++)
 		{
-			MESSAGE_ERROR("fwrite error desc\n");
-			goto _cleanup;
+			void *ptr = var->desc.type == 5 ? *((void**)var->ptr) : var->ptr;
+			size_t len = var->desc.len;
+			if (!ptr) continue;  // SGX entry with NULL target — shouldn't happen here
+			if (!fwrite(&var->desc, sizeof(var->desc), 1, fp))
+			{
+				MESSAGE_ERROR("fwrite error desc\n");
+				goto _cleanup;
+			}
+			if (!fwrite(ptr, len, 1, fp))
+			{
+				MESSAGE_ERROR("fwrite error value\n");
+				goto _cleanup;
+			}
+			MESSAGE_INFO("Saved %s\n", var->desc.key);
 		}
-		if (!fwrite(ptr, len, 1, fp))
-		{
-			MESSAGE_ERROR("fwrite error value\n");
-			goto _cleanup;
-		}
-		MESSAGE_INFO("Saved %s\n", var->desc.key);
 	}
 
 	ret = 0;
