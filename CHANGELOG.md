@@ -26,7 +26,8 @@ First public release.
 
 - SuperGrafx titles are recognised and dispatched to the second VDC.
 - Requires an RP2350 board with PSRAM.
-- Still under development: .sgx games may exhibit graphical glitches.
+- VPC sprite-priority modes 1 and 2 are implemented, with VDC1/VDC2 sprite layering and VDC2 scroll synchronization. Per-scanline background scroll-Y follows Mesen2's IncScrollY model so vertical parallax tracks correctly through the frame.
+- Still under development: some titles exhibit residual graphical glitches (for example per-frame platform flicker in Ghouls 'n Ghosts).
 - On HSTX-based boards the CPU is overclocked to 378 MHz to sustain 60 fps. At this clock the TinyUSB host stack is disabled; USB controllers continue to work through Pico-PIO-USB.
 - On PicoDVI-based boards the CPU remains at 252 MHz; SuperGrafx titles fall back to frameskip and audio is does not work.
 
@@ -39,12 +40,14 @@ First public release.
 - CD-DA audio playback and ADPCM streaming.
 - Requires an RP2350 board with PSRAM and a user-supplied System Card BIOS at `/bios/` (or alongside the disc image). 
 - BIOS files must use the `.pce` extension or be named `cd_bios.rom`. They are identified by CRC32, and when several are present the most capable variant is selected automatically. For broadest compatibility, **Super CD-ROM System v3.0 (JP)** or **Arcade Card Pro (JP)** is recommended.
+- CD playback (most notably CHD) is sensitive to SD card speed. Slow or aging cards can cause intermittent horizontal black-line flicker; a faster card resolves it.
 
 **Save states**
 
 - Manual save and load slots through the in-game menu.
 - Optional auto-save mode stores a state when the game exits and offers to resume it the next time the same ROM is launched.
 - State files are stored on the SD card under `/savestates/PCE/<CRC32>/`.
+- SuperGrafx state is preserved: VDC2 registers, VRAM2, SPRAM2, VPC, and extended WRAM are appended to the state file alongside the VDC1 block.
 
 **Backup RAM (BRAM)**
 
