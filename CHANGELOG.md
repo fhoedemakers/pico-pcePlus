@@ -26,7 +26,7 @@ First public release.
 
 - SuperGrafx titles are recognised and dispatched to the second VDC.
 - Requires an RP2350 board with PSRAM.
-- Still under development: .sgx games exhibit graphical glitches (for example background corruption in Ghouls 'n Ghosts).
+- Still under development: .sgx games may exhibit graphical glitches.
 - On HSTX-based boards the CPU is overclocked to 378 MHz to sustain 60 fps. At this clock the TinyUSB host stack is disabled; USB controllers continue to work through Pico-PIO-USB.
 - On PicoDVI-based boards the CPU remains at 252 MHz; SuperGrafx titles fall back to frameskip and audio is does not work.
 
