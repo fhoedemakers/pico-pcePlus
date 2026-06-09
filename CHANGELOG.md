@@ -31,7 +31,7 @@ First public release. There will be bugs. Please register an issue when you enco
 - On HSTX-based boards the CPU is overclocked to 378 MHz to sustain 60 fps. At this clock the TinyUSB host stack is disabled; USB controllers continue to work through Pico-PIO-USB.
 - On PicoDVI-based boards the CPU remains at 252 MHz; SuperGrafx titles fall back to frameskip and audio is does not work.
 
-Most .sgx games still have graphical glitches. This game does not work at all:
+Most .sgx games still have graphical glitches. This game has severe graphical glitches:
 
 - Madou King Granzort (Japan)
 
