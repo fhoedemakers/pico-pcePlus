@@ -14,7 +14,7 @@ Initial release of pico-pcePlus — a PC Engine / TurboGrafx-16 emulator for RP2
 
 # v0.1
 
-First public release.
+First public release. There will be bugs. Please register an issue when you encounter one.
 
 ## Features
 
