@@ -39,7 +39,7 @@ CMakePresets.json
 *.exe
 *.out
 *.app
-
+*.pce
 **/build*/
 .vscode
 
