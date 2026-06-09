@@ -237,7 +237,7 @@ extern "C" void __not_in_flash_func(osd_gfx_lines_rendered)(int first_line, int 
         display_y <  current_y_offset + FPSEND)
     {
         WORD *fpsBuffer = dst + current_x_offset + 4;
-        int rowInChar = display_y % 8;
+        int rowInChar = display_y - current_y_offset - FPSSTART;
         for (int i = 0; i < 2; i++)
         {
             char fontSlice = getcharslicefrom8x8font(fpsString[i], rowInChar);

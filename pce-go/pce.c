@@ -43,6 +43,19 @@ pce_reset(bool hard)
 		uint8_t was_sgx = PCE.VPC.is_sgx;
 		memset(&PCE.VPC, 0, sizeof(PCE.VPC));
 		PCE.VPC.is_sgx = was_sgx;
+
+		// Hardware default at power-on (Mesen2 PceVpc::ConnectVdc writes
+		// 0x11 to both priority registers). Each nibble = 0x1 puts
+		// "VDC1 enabled, priority mode 0" in all 4 window regions, so
+		// SGX titles that never touch $1FE008/$09 (e.g. Darius Alpha)
+		// still display VDC1. Without this, mix_segment sees cfg==0 in
+		// every region and fills the scanline with the backdrop.
+		PCE.VPC.priority1 = 0x11;
+		PCE.VPC.priority2 = 0x11;
+		PCE.VPC.window_cfg[0] = 0x01;
+		PCE.VPC.window_cfg[1] = 0x01;
+		PCE.VPC.window_cfg[2] = 0x01;
+		PCE.VPC.window_cfg[3] = 0x01;
 	}
 
 	if (hard) {
