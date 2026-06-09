@@ -40,6 +40,7 @@ CMakePresets.json
 *.out
 *.app
 *.pce
+*.sgx
 **/build*/
 .vscode
 
