@@ -549,8 +549,8 @@ cd_load_cue(const char *cue_path)
 		} else if (strncasecmp(p, "TRACK", 5) == 0) {
 			int trk; char type[32] = {0};
 			if (sscanf(p + 5, " %d %31s", &trk, type) != 2) continue;
-			if (CD.num_tracks >= CD_MAX_TRACKS) {
-				printf("cd_load_cue: too many tracks (>%d)\n", CD_MAX_TRACKS);
+			if (CD.num_tracks >= CD_MAX_TRACKS_) {
+				printf("cd_load_cue: too many tracks (>%d)\n", CD_MAX_TRACKS_);
 				break;
 			}
 			if (cur_bin[0] == '\0') {

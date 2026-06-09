@@ -203,7 +203,7 @@ static int load_tracks_from_metadata(chd_file *chd)
 	uint32_t running_lba = 0;
 	uint32_t chd_frame_cursor = 0;
 
-	for (uint32_t i = 0; i < CD_MAX_TRACKS; i++) {
+	for (uint32_t i = 0; i < CD_MAX_TRACKS_; i++) {
 		char meta[256];
 		uint32_t resultlen = 0;
 		uint32_t resulttag = 0;

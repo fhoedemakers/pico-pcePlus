@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define CD_MAX_TRACKS    100
+#define CD_MAX_TRACKS_    100
 #define CD_SECTOR_SIZE   2048
 #define CD_RAW_SECTOR_SIZE 2352
 #define CD_BIN_NAME_MAX  96    // per-track BIN filename (relative to CUE dir)
@@ -127,7 +127,7 @@ typedef struct {
 	uint8_t  acd_rotate;
 
 	// Disc info (parsed from CUE)
-	cd_track_t tracks[CD_MAX_TRACKS];
+	cd_track_t tracks[CD_MAX_TRACKS_];
 	char     cue_dir[256];   // directory containing the CUE (with trailing /)
 	uint8_t  num_tracks;
 	uint8_t  first_track;
