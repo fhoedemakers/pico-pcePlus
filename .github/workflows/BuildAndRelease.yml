@@ -17,7 +17,7 @@ on:
 
 # Must match the project() name in CMakeLists.txt
 env:
-    APP_NAME: pcePlus
+    APP_NAME: picopcePlus
 
 # Allow this workflow to write back to the repository
 permissions:
