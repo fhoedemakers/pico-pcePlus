@@ -205,7 +205,7 @@ cd_term(void)
 	if (CD.adpcm_ram)      { frens_f_free(CD.adpcm_ram);      CD.adpcm_ram = NULL; }
 	if (CD.acd_ram)        { frens_f_free(CD.acd_ram);        CD.acd_ram = NULL; }
 	if (CD.bram)           { frens_f_free(CD.bram);           CD.bram = NULL; }
-	// audio_ring_buf is a static SRAM array — don't free it
+	if (CD.audio_ring_buf) { frens_f_free(CD.audio_ring_buf); CD.audio_ring_buf = NULL; }
 
 	// LoadDisc() allocated PCE.ROM via frens_f_malloc (PSRAM), so we own
 	// that buffer when a CD was attached. Releasing it here — and clearing
@@ -1937,7 +1937,7 @@ cd_audio_update(void)
 		return;
 
 	int reads = 0;
-	while (__atomic_load_n(&CD.audio_ring_count, __ATOMIC_ACQUIRE) < 4
+	while (__atomic_load_n(&CD.audio_ring_count, __ATOMIC_ACQUIRE) < CD_AUDIO_RING_SECTORS
 	       && reads < 2) {
 		uint32_t next_lba = CD.audio_cur_lba
 		                  + __atomic_load_n(&CD.audio_ring_count, __ATOMIC_ACQUIRE);
@@ -1963,8 +1963,8 @@ cd_audio_update(void)
 			// read (also ~30 ms for CHD data tracks), blocking here can
 			// stall core1's main loop long enough that the HSTX DMA chain
 			// underflows and the watchdog triggers a resync. The audio
-			// ring has up to 4 sectors of slack (~52 ms), so skipping a
-			// fill cycle is preferable to blocking.
+			// ring has CD_AUDIO_RING_SECTORS sectors of slack (~13 ms each),
+			// so skipping a fill cycle is preferable to blocking.
 			if (!mutex_try_enter(&sd_mutex, NULL))
 				break;
 			ok = (cd_chd_read_raw_sector(next_lba, dst) == 0);
@@ -1995,7 +1995,7 @@ cd_audio_update(void)
 			audio_next_file_off = off + CD_RAW_SECTOR_SIZE;
 		}
 
-		CD.audio_ring_write = (CD.audio_ring_write + 1) & 3;
+		CD.audio_ring_write = (CD.audio_ring_write + 1) & CD_AUDIO_RING_MASK;
 		__atomic_add_fetch(&CD.audio_ring_count, 1, __ATOMIC_RELEASE);
 		reads++;
 	}
@@ -2024,7 +2024,7 @@ cd_audio_generate_samples(int16_t *out, int num_samples)
 
 		if (CD.audio_cur_sample >= 588) {
 			CD.audio_cur_sample = 0;
-			CD.audio_ring_read = (CD.audio_ring_read + 1) & 3;
+			CD.audio_ring_read = (CD.audio_ring_read + 1) & CD_AUDIO_RING_MASK;
 			__atomic_sub_fetch(&CD.audio_ring_count, 1, __ATOMIC_RELEASE);
 			CD.audio_cur_lba++;
 

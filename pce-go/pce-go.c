@@ -376,8 +376,7 @@ LoadDisc(const char *cue_path)
 	CD.acd_ram        = (uint8_t *)frens_f_malloc(ACD_RAM_SIZE);
 	CD.bram           = (uint8_t *)frens_f_malloc(BRAM_PAGE_SIZE);
 #if PICO_RP2350
-	static uint8_t audio_ring_sram[4 * CD_RAW_SECTOR_SIZE];
-	CD.audio_ring_buf = audio_ring_sram;
+	CD.audio_ring_buf = (uint8_t *)frens_f_malloc(CD_AUDIO_RING_SECTORS * CD_RAW_SECTOR_SIZE);
 #endif
 	if (!CD.cd_ram || !CD.scd_ram || !CD.adpcm_ram || !CD.acd_ram || !CD.bram
 	    || !CD.audio_ring_buf) {

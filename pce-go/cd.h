@@ -12,6 +12,15 @@ extern "C" {
 #define CD_SECTOR_SIZE   2048
 #define CD_RAW_SECTOR_SIZE 2352
 #define CD_BIN_NAME_MAX  96    // per-track BIN filename (relative to CUE dir)
+// CD-DA prefetch ring depth. ~13.3 ms of audio per sector at 44.1 kHz, so
+// 32 sectors ≈ 425 ms — enough headroom to ride out long sd_mutex contention
+// bursts when core0 streams data-track sectors during cutscenes. Must be a
+// power of two (the ring index uses a bit-mask). 32 * 2352 = ~75 KB — lives
+// in PSRAM (allocated via frens_f_malloc in LoadDisc) so SRAM is not eaten.
+// Access pattern is small sequential memcpys (one sector write ~13 ms apart;
+// up to 2940 B read per emulator frame), well within PSRAM bandwidth.
+#define CD_AUDIO_RING_SECTORS 32
+#define CD_AUDIO_RING_MASK    (CD_AUDIO_RING_SECTORS - 1)
 
 // CUE sheet track descriptor. Tracks are stored sequentially as they appear
 // in the CUE. lba_start / lba_end are *disc-level* LBAs (concatenated across
@@ -147,11 +156,11 @@ typedef struct {
 	uint16_t audio_cur_sample;  // 0-587 within current sector
 	uint8_t  audio_end_mode;    // 0=stop, 1=loop, 2=IRQ, 3=stop+status
 
-	// Audio sector ring buffer (4 * CD_RAW_SECTOR_SIZE)
+	// Audio sector ring buffer (CD_AUDIO_RING_SECTORS * CD_RAW_SECTOR_SIZE)
 	uint8_t  *audio_ring_buf;
 	uint8_t  audio_ring_write;
 	uint8_t  audio_ring_read;
-	uint8_t  audio_ring_count;  // filled slots (0-4)
+	uint8_t  audio_ring_count;  // filled slots (0..CD_AUDIO_RING_SECTORS)
 
 	// IRQ state
 	uint8_t  irq_mask;
