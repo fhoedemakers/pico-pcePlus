@@ -842,8 +842,13 @@ static void __not_in_flash_func(mix_vpc_scanline)(uint8_t *out, int width)
 {
 	const uint8_t  backdrop = PCE.Palette[0];
 	const uint32_t bd_4 = 0x01010101u * backdrop;
-	uint16_t w1 = PCE.VPC.window1;
-	uint16_t w2 = PCE.VPC.window2;
+	// Window registers are in VCE dot coordinates where the first visible
+	// pixel is at 16 — convert to screen X (Mesen2: max(0, Window - 16)).
+	// Values <= 16 therefore create no window region.
+	int w1 = (int)PCE.VPC.window1 - 16;
+	int w2 = (int)PCE.VPC.window2 - 16;
+	if (w1 < 0) w1 = 0;
+	if (w2 < 0) w2 = 0;
 
 	// No windows: one segment covers everything.
 	if (w1 == 0 && w2 == 0) {
@@ -984,28 +989,38 @@ void __not_in_flash_func(gfx_latch_context)(int force)
 // when running in SGX mode. line_counter is the visible-area-relative scanline
 // number (line_counter == 0 is the first visible line).
 //
-// Each tick: if line_counter == 0 OR the corresponding BYR-pending flag is
-// set, copy the current BYR into bg_scroll_y without incrementing (matches
-// Mesen2's "latch new BYR, don't advance"). Otherwise bg_scroll_y++. The
-// gfx_context*.scroll_y fields are then set to (bg_scroll_y - line_counter)
+// Each tick: on line_counter == 0 copy BYR into bg_scroll_y without
+// incrementing. On any other line, first apply a pending BYR write if one
+// occurred, then ALWAYS increment — matching Mesen2 PceVdc::IncScrollY, where
+// the latch advances even on the line a new BYR is applied. This is the
+// hardware "BYR+1" quirk: a mid-frame BYR write takes effect at value+1.
+// The gfx_context*.scroll_y fields are then set to (bg_scroll_y - line_counter)
 // so draw_tiles_sgx_line's existing `y = Y + scroll_y` produces the right
 // per-scanline BG row index.
 void __not_in_flash_func(gfx_inc_scroll_y_sgx)(int line_counter)
 {
 	// VDC1
-	if (line_counter == 0 || PCE.VPC.byr_pending_vdc1) {
+	if (line_counter == 0) {
 		PCE.VPC.bg_scroll_y_vdc1 = IO_VDC_REG[BYR].W;
 		PCE.VPC.byr_pending_vdc1 = 0;
 	} else {
+		if (PCE.VPC.byr_pending_vdc1) {
+			PCE.VPC.bg_scroll_y_vdc1 = IO_VDC_REG[BYR].W;
+			PCE.VPC.byr_pending_vdc1 = 0;
+		}
 		PCE.VPC.bg_scroll_y_vdc1 = (PCE.VPC.bg_scroll_y_vdc1 + 1) & 0x1FF;
 	}
 	gfx_context.scroll_y = (int)PCE.VPC.bg_scroll_y_vdc1 - line_counter;
 
 	// VDC2
-	if (line_counter == 0 || PCE.VPC.byr_pending_vdc2) {
+	if (line_counter == 0) {
 		PCE.VPC.bg_scroll_y_vdc2 = PCE.VDC2.regs[BYR].W;
 		PCE.VPC.byr_pending_vdc2 = 0;
 	} else {
+		if (PCE.VPC.byr_pending_vdc2) {
+			PCE.VPC.bg_scroll_y_vdc2 = PCE.VDC2.regs[BYR].W;
+			PCE.VPC.byr_pending_vdc2 = 0;
+		}
 		PCE.VPC.bg_scroll_y_vdc2 = (PCE.VPC.bg_scroll_y_vdc2 + 1) & 0x1FF;
 	}
 	gfx_context_vdc2.scroll_y = (int)PCE.VPC.bg_scroll_y_vdc2 - line_counter;
@@ -1226,7 +1241,13 @@ void __not_in_flash_func(gfx_run)(void)
 			// mode. Sets gfx_context*.scroll_y based on the auto-incrementing
 			// bg_scroll_y_vdc1/2 (with pending-update handling), which is
 			// what real PCE/SGX hardware does and what Mesen2 emulates.
-			if (PCE.VPC.is_sgx) gfx_inc_scroll_y_sgx(line_counter);
+			// VDC2's BXR/CR must be re-latched per line too — otherwise
+			// mid-frame writes (per-line wind effects, dynamically enabled
+			// layers) are stale until the next frame.
+			if (PCE.VPC.is_sgx) {
+				gfx_latch_context_vdc2(1);
+				gfx_inc_scroll_y_sgx(line_counter);
+			}
 			osd_gfx_render_line = line_counter;
 			render_lines(line_counter, line_counter + 1);
 			line_counter++;

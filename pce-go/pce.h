@@ -318,6 +318,7 @@ void pce_term(void);
 void pce_run(void);
 void pce_pause(void);
 void pce_writeIO(uint16_t A, uint8_t V);
+void pce_writeIO_st(uint8_t port, uint8_t V);
 uint8_t pce_readIO(uint16_t A);
 
 
