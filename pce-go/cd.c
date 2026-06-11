@@ -1957,14 +1957,13 @@ cd_audio_update(void)
 			// cd_chd_read_raw_sector already handles the chdman big-endian
 			// -> host little-endian byteswap for audio tracks.
 			//
-			// Use non-blocking mutex acquisition: cd_chd_read_raw_sector
-			// can call libchdr's chd_read which takes ~30 ms per hunk on a
-			// cache miss. If core0 already holds sd_mutex for a SCSI data
-			// read (also ~30 ms for CHD data tracks), blocking here can
-			// stall core1's main loop long enough that the HSTX DMA chain
-			// underflows and the watchdog triggers a resync. The audio
-			// ring has CD_AUDIO_RING_SECTORS sectors of slack (~13 ms each),
-			// so skipping a fill cycle is preferable to blocking.
+			// Use non-blocking mutex acquisition: on HSTX this runs on
+			// core1's background task while core0 takes sd_mutex for SCSI
+			// data reads (~30 ms per CHD hunk decompress during heavy
+			// streaming). Blocking here would idle core1's main loop for
+			// that long; the audio ring has CD_AUDIO_RING_SECTORS sectors
+			// of slack (~13 ms each), so skipping a fill cycle and retrying
+			// on the next loop iteration is preferable.
 			if (!mutex_try_enter(&sd_mutex, NULL))
 				break;
 			ok = (cd_chd_read_raw_sector(next_lba, dst) == 0);
