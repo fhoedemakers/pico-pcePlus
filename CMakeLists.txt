@@ -166,12 +166,13 @@ target_compile_definitions(${projectname} PRIVATE
     # so any frame-time variance causes sample drops → crackling. The 512-entry
     # DI ring has room; raise the watermark to give ~36ms of buffer before drops.
     HSTX_AUDIO_DI_HIGH_WATERMARK=400
-    # Wall-clock per-frame budget that triggers the frame-skip safety net.
-    # ~16200 µs is just under one 60Hz frame; emulating past this means the
-    # audio output will starve unless we skip the next frame's render. Raise
-    # to give heavier games more headroom (more visible stutter); lower to
+    # Per-frame emulation+render time budget (pace wait excluded) that
+    # triggers the frame-skip safety net. ~16250 µs is just under one native
+    # PCE frame (59.826Hz = 16715 µs); working past this means the audio
+    # output will starve unless we skip the next frame's render. Raise to
+    # give heavier games more headroom (more visible stutter); lower to
     # protect audio more aggressively (more dropped frames).
-    PCE_FRAME_SKIP_OVERRUN_US=16200
+    PCE_FRAME_SKIP_OVERRUN_US=16250
     SDCARD_PIN_CS=${SD_CS}
     SDCARD_PIN_SCK=${SD_SCK}
     SDCARD_PIN_MOSI=${SD_MOSI}

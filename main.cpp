@@ -56,7 +56,14 @@ static char fpsString[3] = "00";
 
 #define AUDIOBUFFERSIZE 4096
 #define PCE_AUDIO_RATE 44100
-#define PCE_SAMPLES_PER_FRAME (PCE_AUDIO_RATE / 60)
+// Native PCE NTSC frame rate is 59.826 Hz (263 lines * 1365 master clocks at
+// 21.47727 MHz), not 60. At 44100 Hz audio that's 44100/59.826 ≈ 737.14
+// samples per frame; we emit 737 most frames and 738 occasionally via an
+// exact rational accumulator so audio production locks to 44100 Hz long-term.
+// Buffer sizes use the ceiling.
+#define PCE_SAMPLES_PER_FRAME_MAX 738
+// PCE NTSC frame rate scaled by 10000 (avoids floats in the hot path).
+#define PCE_FPS_X10000 598261u
 
 #define EMULATOR_CLOCKFREQ_KHZ 252000
 static uint32_t CPUFreqKHz = EMULATOR_CLOCKFREQ_KHZ;
@@ -153,8 +160,20 @@ static void buildPaletteLUT()
     }
 }
 
-static int16_t pce_audio_buffer[PCE_SAMPLES_PER_FRAME * 2]; // stereo interleaved
-static int audio_pos = 0;   // PSG samples synthesised so far this frame (0..735)
+static int16_t pce_audio_buffer[PCE_SAMPLES_PER_FRAME_MAX * 2]; // stereo interleaved
+static int audio_pos = 0;   // PSG samples synthesised so far this frame
+static int pce_samples_this_frame = 737;
+
+// Returns the number of audio samples this frame should produce. Exact rational
+// accumulator: target rate = PCE_AUDIO_RATE / 59.8261 Hz. Drift-free long-term.
+static int __not_in_flash_func(advance_samples_this_frame)(void)
+{
+    static uint32_t accum = 0;
+    accum += (uint32_t)PCE_AUDIO_RATE * 10000u;
+    int n = (int)(accum / PCE_FPS_X10000);
+    accum -= (uint32_t)n * PCE_FPS_X10000;
+    return n;  // ~737 or 738 per call; averages 737.143
+}
 
 #define AUDIO_SAMPLES_PER_SCANLINE 4
 
@@ -165,13 +184,13 @@ static int audio_pos = 0;   // PSG samples synthesised so far this frame (0..735
 // position of the register write that triggered this (called from pce_writeIO
 // before the write is applied). Each register state is thus rendered for
 // exactly the cycles it was active — short SFX / DDA are no longer lost to
-// coarse per-batch sampling. The frame always completes to 735 samples via the
-// frame-end flush in osd_psg_scanline, so the downstream consumers are unchanged.
+// coarse per-batch sampling. The frame always completes to pce_samples_this_frame
+// samples via the frame-end flush in osd_psg_scanline.
 extern "C" void __not_in_flash_func(osd_psg_sync)(int frame_cycle)
 {
-    int target = (int)((uint64_t)frame_cycle * PCE_SAMPLES_PER_FRAME / PCE_CYCLES_PER_FRAME);
-    if (target > PCE_SAMPLES_PER_FRAME)
-        target = PCE_SAMPLES_PER_FRAME;
+    int target = (int)((uint64_t)frame_cycle * pce_samples_this_frame / PCE_CYCLES_PER_FRAME);
+    if (target > pce_samples_this_frame)
+        target = pce_samples_this_frame;
     int n = target - audio_pos;
     if (n > 0) {
         psg_update(pce_audio_buffer + audio_pos * 2, n, 0x3F);
@@ -181,9 +200,8 @@ extern "C" void __not_in_flash_func(osd_psg_sync)(int frame_cycle)
 
 extern "C" void __not_in_flash_func(osd_psg_scanline)(void)
 {
-    // Frame-end flush: ensure the whole frame's 735 samples are synthesised
-    // even if the game wrote no PSG registers late in the frame. Sample-accurate
-    // generation otherwise happens on demand in osd_psg_sync at each write.
+    // Frame-end flush: synthesise the remainder of this frame's samples even
+    // if the game wrote no PSG registers late in the frame.
     if (PCE.Scanline >= 262)
         osd_psg_sync(PCE_CYCLES_PER_FRAME);
 }
@@ -262,7 +280,7 @@ extern "C" void __not_in_flash_func(osd_gfx_lines_rendered)(int first_line, int 
 }
 
 #if PICO_RP2350
-static int16_t cd_audio_buffer[PCE_SAMPLES_PER_FRAME * 2];
+static int16_t cd_audio_buffer[PCE_SAMPLES_PER_FRAME_MAX * 2];
 #endif
 
 // Audio-pipeline diagnostics: once per second during CD-DA playback, print
@@ -358,14 +376,14 @@ static void __not_in_flash_func(pushAudioAndOverlay)()
 #endif
         // CD-DA: generate into a scratch buffer and mix into the PSG output.
         if (CD.audio_status == 0) {
-            int n = cd_audio_generate_samples(cd_audio_buffer, PCE_SAMPLES_PER_FRAME);
+            int n = cd_audio_generate_samples(cd_audio_buffer, pce_samples_this_frame);
             for (int i = 0; i < n * 2; i++) {
                 int32_t v = (int32_t)pce_audio_buffer[i] + (int32_t)cd_audio_buffer[i];
                 pce_audio_buffer[i] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
             }
         }
         // ADPCM: decode + resample, summed directly into the PSG output.
-        cd_adpcm_generate_samples(pce_audio_buffer, PCE_SAMPLES_PER_FRAME, PCE_AUDIO_RATE);
+        cd_adpcm_generate_samples(pce_audio_buffer, pce_samples_this_frame, PCE_AUDIO_RATE);
     }
 #endif
 
@@ -377,7 +395,7 @@ static void __not_in_flash_func(pushAudioAndOverlay)()
 #endif
     for (int y = 0; y < 240; y++)
     {
-        for (int a = 0; a < AUDIO_SAMPLES_PER_SCANLINE && audio_idx < PCE_SAMPLES_PER_FRAME; a++, audio_idx++)
+        for (int a = 0; a < AUDIO_SAMPLES_PER_SCANLINE && audio_idx < pce_samples_this_frame; a++, audio_idx++)
         {
             int16_t l = pce_audio_buffer[audio_idx * 2];
             int16_t r = pce_audio_buffer[audio_idx * 2 + 1];
@@ -499,11 +517,21 @@ static inline int ProcessAfterFrameIsRendered()
     tuh_task();
     if (settings.flags.displayFrameRate)
     {
-        uint32_t tick_us = Frens::time_us() - start_tick_us;
-        fps = (1000000 - 1) / tick_us + 1;
-        start_tick_us = Frens::time_us();
-        fpsString[0] = '0' + (fps / 10);
-        fpsString[1] = '0' + (fps % 10);
+        // 1-second windowed average. The previous per-frame ceil(1e6/interval)
+        // misread slack-paced frames: in heavy scenes a no-wait frame (~15.5ms)
+        // alternates with a longer waiting frame, flashing 63-65 on screen even
+        // though the average is locked at ~59.83fps.
+        static uint32_t fpsFrames = 0;
+        fpsFrames++;
+        uint32_t elapsed_us = Frens::time_us() - start_tick_us;
+        if (elapsed_us >= 1000000)
+        {
+            fps = (fpsFrames * 1000000ull + elapsed_us / 2) / elapsed_us;
+            fpsFrames = 0;
+            start_tick_us = Frens::time_us();
+            fpsString[0] = '0' + (fps / 10);
+            fpsString[1] = '0' + (fps % 10);
+        }
     }
 #if WII_PIN_SDA >= 0 and WII_PIN_SCL >= 0
     wiipad_raw_cached = wiipad_read();
@@ -775,10 +803,12 @@ void __not_in_flash_func(process)(void)
 {
     DWORD pdwPad1, pdwPad2, pdwSystem;
     bool skipRender = false;
+    uint32_t frameWorkStartUs = time_us_32();
     while (reset == false)
     {
         readInputAndMapToPCE(&pdwPad1, &pdwPad2, &pdwSystem, false, nullptr);
         audio_pos = 0;
+        pce_samples_this_frame = advance_samples_this_frame();
         gfx_set_skip_render(skipRender);
         pce_run();
         pushAudioAndOverlay();
@@ -795,22 +825,29 @@ void __not_in_flash_func(process)(void)
 #endif
         Frens::setAudioPaceQuery(cdFb ? cdAudioFillPermille : nullptr);
 #endif
+        // Emulation+render time for this frame, EXCLUDING the pace wait below.
+        // The skip trigger must compare work done against the frame budget;
+        // measuring across the pace wait makes the interval equal the paced
+        // frame period (~16.7ms), which exceeds any sub-frame threshold and
+        // made skipRender alternate every frame regardless of load.
+        uint32_t frameWorkUs = time_us_32() - frameWorkStartUs;
         ProcessAfterFrameIsRendered();
+        frameWorkStartUs = time_us_32();
 #if PICO_RP2350
-        // Frame-skip when the emulator can't hold 60fps. Originally for CD
-        // games (audio underrun → HDMI drops / I2S crackles); now also
+        // Frame-skip when the emulator can't hold the frame rate. Originally
+        // for CD games (audio underrun → HDMI drops / I2S crackles); now also
         // applied to HuCard / SGX scenes with heavy sprite work where the
         // PSG audio crackles for the same reason. Skipping rendering keeps
         // CPU+audio running at full speed while only the picture stalls.
         // Never skip twice in a row → ≥30fps video.
         //
         // PicoDVI CD-FB path keeps the precise audio-ring "behind" signal
-        // (only available there). Everything else falls back to wall-clock
-        // overrun: PCE_FRAME_SKIP_OVERRUN_US is tunable from CMakeLists.txt
-        // and defaults to 16200 µs — proactive (just under one 60Hz frame)
-        // so we skip before the audio queue actually underruns.
+        // (only available there). Everything else falls back to the work-time
+        // overrun: PCE_FRAME_SKIP_OVERRUN_US is tunable from CMakeLists.txt —
+        // proactive (just under one 59.826Hz frame, 16715 µs) so we skip
+        // before the audio queue actually underruns.
 #ifndef PCE_FRAME_SKIP_OVERRUN_US
-#define PCE_FRAME_SKIP_OVERRUN_US 16200u
+#define PCE_FRAME_SKIP_OVERRUN_US 16250u
 #endif
 #if !HSTX
         if (CD.cd_attached)
@@ -821,23 +858,14 @@ void __not_in_flash_func(process)(void)
         }
         else
         {
-            // PicoDVI HuCard / SGX: no audio-ring query → wall-clock overrun.
-            static uint32_t lastFrameEndPcd = 0;
-            uint32_t now = time_us_32();
-            bool behind = lastFrameEndPcd
-                       && (now - lastFrameEndPcd) > PCE_FRAME_SKIP_OVERRUN_US;
-            lastFrameEndPcd = now;
+            // PicoDVI HuCard / SGX: no audio-ring query → work-time overrun.
+            bool behind = frameWorkUs > PCE_FRAME_SKIP_OVERRUN_US;
             skipRender = behind && !skipRender;
         }
 #else
-        // HSTX (CD or HuCard / SGX): wall-clock overrun. CD didn't have an
-        // audio-ring query on core0 either, so this branch has always used
-        // the timer-based trigger; we just stop gating it on CD.cd_attached.
-        static uint32_t lastFrameEnd = 0;
-        uint32_t now = time_us_32();
-        bool behind = lastFrameEnd
-                   && (now - lastFrameEnd) > PCE_FRAME_SKIP_OVERRUN_US;
-        lastFrameEnd = now;
+        // HSTX (CD or HuCard / SGX): work-time overrun. CD has no audio-ring
+        // query on core0 either, so both use the same trigger.
+        bool behind = frameWorkUs > PCE_FRAME_SKIP_OVERRUN_US;
         skipRender = behind && !skipRender;
 #endif
 #endif

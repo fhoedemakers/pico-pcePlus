@@ -176,7 +176,9 @@ void __not_in_flash_func(psg_update)(int16_t *output, size_t length, uint32_t ch
 
 	memset(output, 0, length * sizeof(int16_t));
 #if 1
-	static sample_t mix_buffer[((44100 / 60) * 2) + 2];
+	// Sized for the worst-case per-call count at 59.826 Hz pacing
+	// (44100/59.826 ≈ 737.14 → 738 mono samples → 1476 stereo entries).
+	static sample_t mix_buffer[(738 * 2) + 4];
 #else
 	static sample_t mix_buffer[256]; // Use this to test buffer overflow
 #endif
