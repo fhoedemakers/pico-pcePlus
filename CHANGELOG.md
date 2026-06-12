@@ -20,6 +20,7 @@ Initial release of pico-pcePlus — a PC Engine / TurboGrafx-16 emulator for RP2
 
 ## Fixes
 
+- Games no longer run too fast. The emulator now runs at the PC Engine's native frame rate of 59.83 fps instead of 60 fps, and a frame-pacing bug that let demanding scenes run unthrottled (up to ~65 fps, speeding up music and gameplay) has been fixed. Audio stays in sync and is unaffected.
 - Fixed graphical glitches in SuperGrafx games:
 	- Ghouls 'n Ghosts
 	- Aldynes
@@ -27,6 +28,7 @@ Initial release of pico-pcePlus — a PC Engine / TurboGrafx-16 emulator for RP2
 	- Madou King Granzort
 - Fixed screen tearing when playing CHD-based CD games.
 - Greatly reduced crackling audio in CD titles on certain configurations.
+- The FPS overlay now shows a per-second average instead of a fluctuating per-frame estimate.
 
 ## For developers
 
