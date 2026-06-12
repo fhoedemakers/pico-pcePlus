@@ -219,7 +219,11 @@ LoadCard(uint8_t *data, size_t size)
 	if (PCE.ROM_SIZE >= 192)
 		PCE.MemoryMapW[0x00] = PCE.IOAREA;
 
-	ResetPCE(0);
+	// Hard reset on HuCard load — matches LoadDisc() and clears VRAM/VRAM2/
+	// SPRAM/SPRAM2/Palette/RAM. VRAM2 lives in PSRAM (frens_f_malloc, no zero
+	// init), so without this an SGX title sees previous-game / firmware
+	// leftovers in its VDC2 working memory (intermittent Granzort title bg).
+	ResetPCE(1);
 
 	return 0;
 }

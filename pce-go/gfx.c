@@ -842,6 +842,14 @@ static void __not_in_flash_func(mix_vpc_scanline)(uint8_t *out, int width)
 {
 	const uint8_t  backdrop = PCE.Palette[0];
 	const uint32_t bd_4 = 0x01010101u * backdrop;
+#ifdef PCE_HOST_DEBUG
+	// Host harness: solo one VDC's output to identify which layer holds what.
+	extern int pce_dbg_solo_vdc;
+	if (pce_dbg_solo_vdc) {
+		mix_segment(out, 0, width, pce_dbg_solo_vdc == 1 ? 0x01 : 0x02, bd_4, backdrop);
+		return;
+	}
+#endif
 	// Window registers are in VCE dot coordinates where the first visible
 	// pixel is at 16 — convert to screen X (Mesen2: max(0, Window - 16)).
 	// Values <= 16 therefore create no window region.
@@ -1117,6 +1125,12 @@ gfx_reset(bool hard)
 {
 	last_line_counter = 0;
 	line_counter = 0;
+	// Clear the VDC1/VDC2 latched scroll/control mirrors. Without this, a
+	// previous game's scroll_x / scroll_y / control leaks into the first
+	// frame after a warm reload — visible until the new game's next BXR/BYR/
+	// CR write re-latches the context.
+	memset(&gfx_context, 0, sizeof(gfx_context));
+	memset(&gfx_context_vdc2, 0, sizeof(gfx_context_vdc2));
 }
 
 
@@ -1218,7 +1232,14 @@ void __not_in_flash_func(gfx_run)(void)
 
 	/* Visible area */
 	if (scanline >= 14 && scanline <= 255) {
-		if (scanline == IO_VDC_MINLINE) {
+		// A game can program VPR so the display starts above the emulated
+		// window (Granzort title: VPR=0x0902 -> MINLINE=11 < 14). Rendering
+		// is clamped to scanline 14 by the guard above, so the sprite-list
+		// build must fire at the first line actually rendered — with the
+		// unclamped compare it never fires and the per-line sprite bitmasks
+		// freeze, blanking all sprites (or ghosting them at stale positions).
+		int min_render_line = IO_VDC_MINLINE < 14 ? 14 : IO_VDC_MINLINE;
+		if (scanline == min_render_line) {
 			gfx_latch_context(1);
 			build_sprite_lists(VDC1_CTX, sprite_bitmask_per_line);
 			if (PCE.VPC.is_sgx) {

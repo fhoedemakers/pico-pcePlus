@@ -1,0 +1,12 @@
+pce_host
+out/
+solo1/
+solo2/
+fixed/
+darius/
+darius2/
+ghouls/
+dalpha/
+*.ppm
+*.png
+*.bin
