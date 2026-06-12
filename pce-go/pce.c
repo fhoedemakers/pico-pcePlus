@@ -232,6 +232,10 @@ void __not_in_flash_func(pce_run)(void)
 		}
 		gfx_run();
 		osd_psg_scanline();
+		// Subcode IRQ cadence: every other scanline ≈ 7.9 kHz, near the
+		// 7350 Hz byte rate of the real subchannel stream.
+		if (PCE.Scanline & 1)
+			cd_subcode_tick();
 	}
 }
 

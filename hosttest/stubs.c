@@ -24,6 +24,7 @@ int  cd_load_cue(const char *cue_path) { (void)cue_path; return -1; }
 int  cd_find_bios(char *out_path, size_t size, const char *primary_dir, bios_variant_t *variant)
 { (void)out_path; (void)size; (void)primary_dir; (void)variant; return -1; }
 bool cd_bios_is_us(void) { return false; }
+void cd_subcode_tick(void) {}
 
 int  cd_chd_open(const char *path) { (void)path; return -1; }
 void cd_chd_close(void) {}

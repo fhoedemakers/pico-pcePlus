@@ -156,6 +156,16 @@ typedef struct {
 	uint16_t audio_cur_sample;  // 0-587 within current sector
 	uint8_t  audio_end_mode;    // 0=stop, 1=loop, 2=IRQ, 3=stop+status
 
+	// CD-DA sample latch ($1805 write toggles L/R and latches the current
+	// sample; $1805/$1806 reads return it; $1803 bit 1 reports the channel).
+	// last_left/right_sample are kept current by cd_audio_generate_samples
+	// so the latch never has to touch the PSRAM ring from the emulation
+	// core (QMI contention with core1 streaming causes audio crackle).
+	bool     read_right_channel;
+	int16_t  audio_sample_latch;
+	int16_t  last_left_sample;
+	int16_t  last_right_sample;
+
 	// Audio sector ring buffer (CD_AUDIO_RING_SECTORS * CD_RAW_SECTOR_SIZE)
 	uint8_t  *audio_ring_buf;
 	uint8_t  audio_ring_write;
@@ -205,6 +215,15 @@ void cd_close(void);
 // CD Audio (called from main loop each frame)
 void cd_audio_update(void);
 int  cd_audio_generate_samples(int16_t *out, int num_samples);
+
+// Diagnostics: cumulative CD-DA ring underrun count (see CD_AUDIO_DIAG)
+extern volatile uint32_t cd_audio_underruns;
+
+// Subchannel tick: raises the subcode IRQ (bit 0x10) at ~7.4 kHz whether or
+// not audio is playing, like real hardware delivering one subcode byte per
+// 1/7350 s. The System Card audio-CD player won't populate its track list
+// without it. Called from the pce.c scanline loop every other line.
+void cd_subcode_tick(void);
 
 // ADPCM playback: decode 4-bit ADPCM to PCM at the programmed rate,
 // resampled to the host rate and summed into out[]. Returns true if any

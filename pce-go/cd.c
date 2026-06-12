@@ -36,6 +36,42 @@ extern void  frens_f_free(void *ptr);
 // Global CD state (zero-initialized).
 cd_state_t CD;
 
+// ---------------------------------------------------------------------------
+// SCSI traffic tracing. Set CD_DEBUG_SCSI to 1 to log every SCSI command the
+// BIOS issues and the bytes we hand back. Used to diff against Mesen2 when a
+// new disc layout (e.g. pure audio CD) doesn't enumerate correctly.
+// ---------------------------------------------------------------------------
+#ifndef CD_DEBUG_SCSI
+#define CD_DEBUG_SCSI 0
+#endif
+
+#if CD_DEBUG_SCSI
+static bool scsi_first_cmd_dumped = false;
+static bool scsi_log_this = true; // set per-command; false for skipped SUBQs
+
+static void scsi_dump_hex(const char *label, const uint8_t *buf, uint32_t len)
+{
+	printf("%s [%lu]:", label, (unsigned long)len);
+	for (uint32_t i = 0; i < len && i < 32; i++)
+		printf(" %02X", buf[i]);
+	if (len > 32) printf(" ...");
+	printf("\n");
+}
+
+static void scsi_dump_state_once(void)
+{
+	if (scsi_first_cmd_dumped) return;
+	scsi_first_cmd_dumped = true;
+	printf("[scsi] first BIOS command after boot. CD state:\n");
+	printf("  cd_attached=%d num_tracks=%u first=%u last=%u total_lba=%lu\n",
+	       (int)CD.cd_attached, CD.num_tracks, CD.first_track, CD.last_track,
+	       (unsigned long)CD.total_lba);
+	printf("  audio_status=%u audio_cur_lba=%lu bios_variant=%d bios_is_us=%d\n",
+	       CD.audio_status, (unsigned long)CD.audio_cur_lba,
+	       (int)CD.bios_variant, (int)CD.bios_is_us);
+}
+#endif
+
 // Mutex protecting all FatFS calls so core1 can do audio reads safely.
 static mutex_t sd_mutex;
 static bool sd_mutex_inited = false;
@@ -154,6 +190,8 @@ cd_reset(void)
 	CD.audio_ring_write = 0;
 	CD.audio_ring_read = 0;
 	CD.audio_ring_count = 0;
+	CD.read_right_channel = false;
+	CD.audio_sample_latch = 0;
 	CD.irq_status = 0;
 	CD.sense_key = 0;
 	CD.sense_asc = 0;
@@ -530,6 +568,9 @@ cd_load_cue(const char *cue_path)
 	CD.total_lba   = 0;
 	cur_bin[0]     = '\0';
 	int current_track = -1;
+#if CD_DEBUG_SCSI
+	scsi_first_cmd_dumped = false;
+#endif
 
 	// --- Parse pass ---
 	// We accept CUE files with either a single FILE covering all tracks
@@ -856,6 +897,30 @@ static void cdc_set_error(uint8_t key, uint8_t asc, uint8_t ascq)
 static void cdc_process_command(void)
 {
 	uint8_t cmd = CD.scsi_command[0];
+#if CD_DEBUG_SCSI
+	scsi_dump_state_once();
+	const char *opname =
+		cmd == 0x00 ? "TEST_UNIT_READY" :
+		cmd == 0x03 ? "REQUEST_SENSE" :
+		cmd == 0x08 ? "READ(6)" :
+		cmd == 0xD8 ? "SAPSP" :
+		cmd == 0xD9 ? "SAPEP" :
+		cmd == 0xDA ? "PAUSE" :
+		cmd == 0xDD ? "READ_SUBQ" :
+		cmd == 0xDE ? "GET_DIR_INFO" : "UNKNOWN";
+	// The player polls READ_SUBQ continuously during playback; logging
+	// every poll saturates USB-serial and starves the emulator. Sample
+	// 1 in 64 SUBQs; everything else is rare enough to log always.
+	static uint16_t subq_log_skip = 0;
+	scsi_log_this = (cmd != 0xDD) || (subq_log_skip++ % 64) == 0;
+	if (scsi_log_this) {
+		printf("[scsi] CMD %02X %s  bytes:", cmd, opname);
+		for (int i = 0; i < 10; i++) printf(" %02X", CD.scsi_command[i]);
+		if (cmd == 0xDE) printf("  (sub=%u)", CD.scsi_command[1]);
+		if (cmd == 0xDD) printf("  (1-in-64 sample)");
+		printf("\n");
+	}
+#endif
 	switch (cmd) {
 	case 0x00: // TEST UNIT READY
 		if (CD.num_tracks > 0) {
@@ -874,6 +939,9 @@ static void cdc_process_command(void)
 		sense[12] = CD.sense_asc;
 		sense[13] = CD.sense_ascq;
 		CD.sense_key = CD.sense_asc = CD.sense_ascq = 0;
+#if CD_DEBUG_SCSI
+		scsi_dump_hex("[scsi] REQUEST_SENSE  ->", sense, 18);
+#endif
 		cdc_data_in(sense, 18);
 		break;
 	}
@@ -910,10 +978,19 @@ static void cdc_process_command(void)
 		CD.audio_cur_lba   = lba;
 		CD.audio_cur_sample = 0;
 		cd_audio_flush_ring();
+		// Mesen2 PceCdAudioPlayer::Play semantics: default end position is
+		// the end of the track the start LBA falls in (SAPEP overrides it),
+		// and cmd[1]==0 means "seek and pause" — NOT play. The System Card
+		// player cues with cmd[1]==0 then starts with cmd[1]==1; getting
+		// this backwards makes it skip every track as unplayable.
+		int sidx = find_track(lba);
+		CD.audio_end_lba  = (sidx >= 0) ? CD.tracks[sidx].lba_end
+		                                : CD.total_lba;
+		CD.audio_end_mode = 0; // stop at end
 		if (CD.scsi_command[1] == 0) {
-			CD.audio_status = 0; // Playing
+			CD.audio_status = 2; // Paused (cued)
 		} else {
-			CD.audio_status = 2; // Paused
+			CD.audio_status = 0; // Playing
 		}
 		cdc_set_good_status();
 		break;
@@ -921,6 +998,8 @@ static void cdc_process_command(void)
 
 	case 0xD9: { // SAPEP — Set Audio Playback End Position
 		uint32_t lba = parse_audio_lba(CD.scsi_command);
+		if (lba > CD.total_lba)
+			lba = CD.total_lba; // clamp to disc end (Mesen2 SetEndPosition)
 		switch (CD.scsi_command[1]) {
 		case 0:
 			CD.audio_status = 3; // Stopped
@@ -941,6 +1020,7 @@ static void cdc_process_command(void)
 		case 3:
 			CD.audio_end_lba  = lba;
 			CD.audio_end_mode = 3; // Stop
+			CD.audio_status   = 0; // Playing (SetEndPosition always starts)
 			cdc_set_good_status();
 			break;
 		default:
@@ -956,23 +1036,32 @@ static void cdc_process_command(void)
 		break;
 
 	case 0xDD: { // READ SUBQ
+		// Layout matches Mesen2 PceScsiBus::CmdReadSubCodeQ:
+		// [0] audio status, [1] ADR/Control, [2] track BCD, [3] index,
+		// [4..6] track-relative MSF, [7..9] absolute MSF.
 		uint8_t subq[10];
 		memset(subq, 0, sizeof(subq));
 		subq[0] = CD.audio_status;
 		int ti = find_track(CD.audio_cur_lba);
 		if (ti < 0) ti = 0;
 		cd_track_t *qt = &CD.tracks[ti];
-		subq[1] = bin2bcd(qt->track_no);
-		subq[2] = 0x01;
+		subq[1] = qt->type ? 0x41 : 0x01; // ADR=1 | control bit 6 on data
+		subq[2] = bin2bcd(qt->track_no);
+		subq[3] = 1; // index number
 		uint32_t rel = CD.audio_cur_lba - qt->lba_start;
-		subq[3] = bin2bcd(rel / 4500);
-		subq[4] = bin2bcd((rel / 75) % 60);
-		subq[5] = bin2bcd(rel % 75);
-		uint8_t am, as, af;
-		lba_to_msf(CD.audio_cur_lba, &am, &as, &af);
-		subq[6] = bin2bcd(am);
-		subq[7] = bin2bcd(as);
-		subq[8] = bin2bcd(af);
+		subq[4] = bin2bcd(rel / 4500);
+		subq[5] = bin2bcd((rel / 75) % 60);
+		subq[6] = bin2bcd(rel % 75);
+		// Absolute MSF without the +150 lead-in offset — Mesen2 only
+		// applies that offset in TOC track-start replies, not here.
+		uint32_t abs_lba = CD.audio_cur_lba;
+		subq[7] = bin2bcd(abs_lba / 4500);
+		subq[8] = bin2bcd((abs_lba / 75) % 60);
+		subq[9] = bin2bcd(abs_lba % 75);
+#if CD_DEBUG_SCSI
+		if (scsi_log_this)
+			scsi_dump_hex("[scsi] READ_SUBQ      ->", subq, 10);
+#endif
 		cdc_data_in(subq, 10);
 		break;
 	}
@@ -986,6 +1075,9 @@ static void cdc_process_command(void)
 				bin2bcd(CD.num_tracks),
 				0, 0
 			};
+#if CD_DEBUG_SCSI
+			scsi_dump_hex("[scsi] TOC sub=0      ->", r, 4);
+#endif
 			cdc_data_in(r, 4);
 			break;
 		}
@@ -993,6 +1085,9 @@ static void cdc_process_command(void)
 			uint8_t m, s, f;
 			lba_to_msf(CD.total_lba, &m, &s, &f);
 			uint8_t r[4] = { bin2bcd(m), bin2bcd(s), bin2bcd(f), 0 };
+#if CD_DEBUG_SCSI
+			scsi_dump_hex("[scsi] TOC sub=1      ->", r, 4);
+#endif
 			cdc_data_in(r, 4);
 			break;
 		}
@@ -1026,10 +1121,18 @@ static void cdc_process_command(void)
 					memset(r, 0, 4);
 				}
 			}
+#if CD_DEBUG_SCSI
+			printf("[scsi] TOC sub=2 trk=%02X -> ", CD.scsi_command[2]);
+			for (int i = 0; i < 4; i++) printf("%02X ", r[i]);
+			printf("\n");
+#endif
 			cdc_data_in(r, 4);
 			break;
 		}
 		default:
+#if CD_DEBUG_SCSI
+			printf("[scsi] TOC sub=%02X UNHANDLED -> set_error\n", sub);
+#endif
 			cdc_set_error(0x05, 0x24, 0x00);
 			break;
 		}
@@ -1037,6 +1140,9 @@ static void cdc_process_command(void)
 	}
 
 	default:
+#if CD_DEBUG_SCSI
+		printf("[scsi] UNHANDLED OPCODE %02X -> good_status (no data)\n", cmd);
+#endif
 		cdc_set_good_status();
 		break;
 	}
@@ -1443,22 +1549,34 @@ cd_read(uint16_t addr)
 	case 0x1802:
 		return CD.irq_mask | (scsi_ack ? 0x80 : 0x00);
 
-	// --- $1803: active IRQs + BRAM lock ---
+	// --- $1803: active IRQs + L/R channel flag + BRAM lock ---
 	case 0x1803: {
-		uint8_t v = cdc_active_irqs;
-		// Clear event-based IRQ bits on read. Bits 0x20/0x40 are level-
-		// sensitive (SCSI phase); 0x04/0x08/0x10 are events (ADPCM half,
-		// ADPCM end, SubCode). Without ADPCM playback the half/end flags
-		// would stay set forever after a length latch.
-		cdc_active_irqs &= ~(0x04 | 0x08 | 0x10);
+		// Bit 1 mirrors the sample-latch channel select (set = next $1805
+		// write latches the LEFT channel), matching Mesen2's PceCdRom.
+		uint8_t v = cdc_active_irqs | (CD.read_right_channel ? 0 : 0x02);
+		// Clear ADPCM event bits on read. Bits 0x20/0x40 are level-
+		// sensitive (SCSI phase); 0x10 (SubCode) is cleared by reading
+		// $1807. Without ADPCM playback the half/end flags would stay
+		// set forever after a length latch.
+		cdc_active_irqs &= ~(0x04 | 0x08);
 		cdc_update_irqs();
 		CD.bram_locked = true;
 		return v;
 	}
 
-	case 0x1804: return 0x00;
-	case 0x1805: return 0x00;
-	case 0x1806: return 0x00;
+	case 0x1804: return cdc_reset_reg;
+	case 0x1805: return (uint8_t)CD.audio_sample_latch;
+	case 0x1806: return (uint8_t)((uint16_t)CD.audio_sample_latch >> 8);
+
+	// --- $1807: subcode data port (read side; write side is BRAM unlock).
+	// Reading delivers the current subchannel byte and clears the subcode
+	// IRQ. We carry no real Q data ( Mesen2 only has it when a .sub file
+	// sits next to the CUE) so the data is always 0 — the System Card
+	// player works with all-zero subcode, it just needs the IRQ cadence.
+	case 0x1807:
+		cdc_active_irqs &= ~0x10;
+		cdc_update_irqs();
+		return 0x00;
 
 	// --- $1808: SCSI data port read WITH auto-ACK (DATA_IN) ---
 	case 0x1808: {
@@ -1564,6 +1682,11 @@ cd_write(uint16_t addr, uint8_t val)
 			scsi_ack = new_ack;
 			cdc_update_state();
 		}
+#if CD_DEBUG_SCSI
+		if ((val & 0x7F) != CD.irq_mask)
+			printf("[scsi] IRQ mask %02X -> %02X%s\n", CD.irq_mask,
+			       val & 0x7F, (val & 0x10) ? "  (subcode ON)" : "");
+#endif
 		CD.irq_mask = val & 0x7F;
 		cdc_update_irqs();
 		break;
@@ -1585,6 +1708,21 @@ cd_write(uint16_t addr, uint8_t val)
 			CD.audio_status = 3; // Stopped
 			cd_audio_flush_ring();
 			cdc_update_irqs();
+		}
+		break;
+
+	// --- $1805: latch current CD-DA sample, alternating L/R channel.
+	// Served from the SRAM-cached last sample pair — reading the PSRAM
+	// ring from here (emulation core) contends on QMI with core1's
+	// SD-to-ring streaming and audibly crackles the audio output.
+	case 0x1805:
+		CD.read_right_channel = !CD.read_right_channel;
+		if (CD.audio_status == 0) {
+			CD.audio_sample_latch = CD.read_right_channel
+			                      ? CD.last_right_sample
+			                      : CD.last_left_sample;
+		} else {
+			CD.audio_sample_latch = 0;
 		}
 		break;
 
@@ -1912,11 +2050,45 @@ static uint32_t parse_audio_lba(const uint8_t *cmd)
 	case 0x80: {
 		int trk = bcd2bin(cmd[2]);
 		int idx = find_track_by_number(trk);
-		return (idx >= 0) ? CD.tracks[idx].lba_start : 0;
+		if (idx >= 0)
+			return CD.tracks[idx].lba_start;
+		// BIOS sets "end of track N" as "start of track N+1"; for the
+		// last track that's one past the end of the disc. Mesen2 maps it
+		// to the last track's end sector (Tenshi no Uta 2 relies on it,
+		// and the System Card player needs it to play the final track).
+		if (trk == CD.last_track + 1 && CD.num_tracks > 0)
+			return CD.tracks[CD.num_tracks - 1].lba_end;
+		return 0;
 	}
 	}
 	return 0;
 }
+
+// Subchannel tick — mirrors Mesen2 PceCdAudioPlayer::Exec, which raises the
+// subcode IRQ every 6 samples (7350 Hz) "regardless of whether or not the
+// cd-rom is playing, paused, stopped or seeking". The System Card audio-CD
+// player arms this IRQ at the player screen and builds its track display
+// from the resulting cadence; without it the track list stays empty. Called
+// from the pce.c scanline loop every other line (~7.9 kHz, close enough —
+// the Q data itself is always zero, see the $1807 read handler).
+void cd_subcode_tick(void)
+{
+	if (!CD.cd_attached)
+		return;
+	// Re-raise only after the previous byte was consumed ($1807 read
+	// clears the bit). A slow or absent handler simply sees fewer IRQs —
+	// on hardware the unread bytes are lost the same way — and games that
+	// mask the subcode IRQ pay nothing here beyond this check.
+	if (cdc_active_irqs & 0x10)
+		return;
+	cdc_active_irqs |= 0x10;
+	cdc_update_irqs();
+}
+
+// Diagnostics: CD-DA ring underruns (ring empty while the mixer still
+// wanted samples — each one is an audible zero-fill gap). Read by the
+// CD_AUDIO_DIAG 1 Hz overlay in main.cpp; never reset here.
+volatile uint32_t cd_audio_underruns = 0;
 
 static uint32_t audio_next_file_off = 0xFFFFFFFF;
 
@@ -2009,6 +2181,7 @@ cd_audio_generate_samples(int16_t *out, int num_samples)
 	int generated = 0;
 	while (generated < num_samples) {
 		if (__atomic_load_n(&CD.audio_ring_count, __ATOMIC_ACQUIRE) == 0) {
+			cd_audio_underruns++;
 			memset(out + generated * 2, 0, (num_samples - generated) * 4);
 			break;
 		}
@@ -2020,15 +2193,15 @@ cd_audio_generate_samples(int16_t *out, int num_samples)
 		memcpy(out + generated * 2, sector + CD.audio_cur_sample * 4, n * 4);
 		generated += n;
 		CD.audio_cur_sample += n;
+		// Keep the $1805 sample-latch source current (SRAM, no ring read)
+		CD.last_left_sample  = out[(generated - 1) * 2];
+		CD.last_right_sample = out[(generated - 1) * 2 + 1];
 
 		if (CD.audio_cur_sample >= 588) {
 			CD.audio_cur_sample = 0;
 			CD.audio_ring_read = (CD.audio_ring_read + 1) & CD_AUDIO_RING_MASK;
 			__atomic_sub_fetch(&CD.audio_ring_count, 1, __ATOMIC_RELEASE);
 			CD.audio_cur_lba++;
-
-			cdc_active_irqs |= 0x10;
-			cdc_update_irqs();
 
 			if (CD.audio_cur_lba >= CD.audio_end_lba) {
 				switch (CD.audio_end_mode) {

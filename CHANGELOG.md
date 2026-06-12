@@ -14,6 +14,10 @@ Initial release of pico-pcePlus — a PC Engine / TurboGrafx-16 emulator for RP2
 
 # v0.2
 
+## New
+
+- You can now play audio CDs with the CD player built into the System Card BIOS. Put a `.cue`/`.bin` or `.chd` image of a music CD on the SD card and start it like a CD game: the track list appears and playback, track skip, pause and the level meters all work.
+
 ## Fixes
 
 - Fixed graphical glitches in SuperGrafx games:

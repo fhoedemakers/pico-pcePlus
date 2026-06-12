@@ -265,6 +265,58 @@ extern "C" void __not_in_flash_func(osd_gfx_lines_rendered)(int first_line, int 
 static int16_t cd_audio_buffer[PCE_SAMPLES_PER_FRAME * 2];
 #endif
 
+// Audio-pipeline diagnostics: once per second during CD-DA playback, print
+// the minimum levels reached by each buffer in the chain (CD-DA prefetch
+// ring, HDMI data-island queue, I2S ring) plus the underrun delta. The
+// buffer whose minimum approaches zero around an audible crackle is the
+// one to fix. Compile with -DCD_AUDIO_DIAG=1; default off.
+#ifndef CD_AUDIO_DIAG
+#define CD_AUDIO_DIAG 0
+#endif
+#if CD_AUDIO_DIAG && PICO_RP2350
+#if USE_I2S_AUDIO
+extern "C" int audio_i2s_get_fill_permille();
+#endif
+static void __not_in_flash_func(cdAudioDiagTick)()
+{
+    static uint32_t min_cdring = UINT32_MAX, min_di = UINT32_MAX;
+    static int min_i2s = INT32_MAX;
+    static uint32_t last_underruns = 0;
+    static int frames = 0;
+    static bool played = false;
+
+    if (!CD.cd_attached)
+        return;
+    if (CD.audio_status == 0)
+        played = true;
+    uint32_t rc = CD.audio_ring_count;
+    if (rc < min_cdring) min_cdring = rc;
+#if HSTX
+    uint32_t di = hstx_di_queue_get_level();
+    if (di < min_di) min_di = di;
+#endif
+#if USE_I2S_AUDIO
+    int fp = audio_i2s_get_fill_permille();
+    if (fp < min_i2s) min_i2s = fp;
+#endif
+    if (++frames < 60)
+        return;
+    if (played) {
+        printf("[adiag] cdring_min=%lu/%u di_min=%lu i2s_min=%d underruns+%lu\n",
+               (unsigned long)min_cdring, CD_AUDIO_RING_SECTORS,
+               min_di == UINT32_MAX ? 0UL : (unsigned long)min_di,
+               min_i2s == INT32_MAX ? -1 : min_i2s,
+               (unsigned long)(cd_audio_underruns - last_underruns));
+        last_underruns = cd_audio_underruns;
+    }
+    frames = 0;
+    played = false;
+    min_cdring = UINT32_MAX;
+    min_di = UINT32_MAX;
+    min_i2s = INT32_MAX;
+}
+#endif
+
 #if !HSTX && PICO_RP2350
 #if USE_I2S_AUDIO
 extern "C" int audio_i2s_get_fill_permille();
@@ -388,6 +440,9 @@ static void __not_in_flash_func(pushAudioAndOverlay)()
 #endif
 #endif
 
+#if CD_AUDIO_DIAG && PICO_RP2350
+    cdAudioDiagTick();
+#endif
     // FPS overlay is rendered inline in osd_gfx_lines_rendered()
 }
 
