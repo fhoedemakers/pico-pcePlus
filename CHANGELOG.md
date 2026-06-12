@@ -12,6 +12,19 @@ Initial release of pico-pcePlus — a PC Engine / TurboGrafx-16 emulator for RP2
 > [!IMPORTANT]
 > An **RP2350** board is required. The original RP2040 (Pico 1) is not supported.
 
+# v0.2
+
+## Fixes
+
+- Fixed graphical glitches in SuperGrafx games:
+	- Ghouls 'n Ghosts
+	- Aldynes
+	- Darius Plus
+	- Madou King Granzort
+- Fixed screen tearing when playing CHD-based CD games.
+- Greatly reduced crackling audio in CD titles on certain configurations.
+
+
 # v0.1
 
 First public release. There will be bugs. Please register an issue when you encounter one.
