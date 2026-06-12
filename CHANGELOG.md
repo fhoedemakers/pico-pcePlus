@@ -28,6 +28,10 @@ Initial release of pico-pcePlus — a PC Engine / TurboGrafx-16 emulator for RP2
 - Fixed screen tearing when playing CHD-based CD games.
 - Greatly reduced crackling audio in CD titles on certain configurations.
 
+## For developers
+
+- Added a Linux host test harness (`hosttest/`) that runs the emulator core on a PC for faster debugging — no Pico or flashing needed. See `hosttest/README.md`.
+
 
 # v0.1
 
