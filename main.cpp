@@ -280,7 +280,9 @@ extern "C" void __not_in_flash_func(osd_gfx_lines_rendered)(int first_line, int 
 }
 
 #if PICO_RP2350
-static int16_t cd_audio_buffer[PCE_SAMPLES_PER_FRAME_MAX * 2];
+// Heap-allocated for the lifetime of a CD-game session so the menu doesn't
+// hold ~3 KB it can't use.
+static int16_t *cd_audio_buffer = nullptr;
 #endif
 
 // Audio-pipeline diagnostics: once per second during CD-DA playback, print
@@ -375,7 +377,7 @@ static void __not_in_flash_func(pushAudioAndOverlay)()
             cd_audio_update();
 #endif
         // CD-DA: generate into a scratch buffer and mix into the PSG output.
-        if (CD.audio_status == 0) {
+        if (CD.audio_status == 0 && cd_audio_buffer) {
             int n = cd_audio_generate_samples(cd_audio_buffer, pce_samples_this_frame);
             for (int i = 0; i < n * 2; i++) {
                 int32_t v = (int32_t)pce_audio_buffer[i] + (int32_t)cd_audio_buffer[i];
@@ -1123,6 +1125,9 @@ int main()
             }
 #endif
             if (isCDGame) {
+                cd_audio_buffer = (int16_t *)malloc(PCE_SAMPLES_PER_FRAME_MAX * 2 * sizeof(int16_t));
+                if (!cd_audio_buffer)
+                    printf("WARN: malloc cd_audio_buffer failed; CD audio will be silent\n");
 #if HSTX
                 extern void video_output_set_background_task(void (*)(void));
                 video_output_set_background_task(cd_audio_update);
@@ -1159,6 +1164,8 @@ int main()
                          Frens::getCrcOfLoadedRom());
                 cd_bram_save(bramPath);
                 cd_close();
+                free(cd_audio_buffer);
+                cd_audio_buffer = nullptr;
             } else {
                 PCE.ROM = NULL; // prevent ShutdownPCE from freeing flash/PSRAM
             }
