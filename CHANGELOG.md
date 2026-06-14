@@ -1,6 +1,6 @@
 # CHANGELOG
 
-Initial release of pico-pcePlus — a PC Engine / TurboGrafx-16 emulator for RP2350-based boards.
+SuperGrafx graphics fixes, smoother audio, and other improvements.
 
 
 # General Info
@@ -20,7 +20,7 @@ Initial release of pico-pcePlus — a PC Engine / TurboGrafx-16 emulator for RP2
 
 ## Fixes
 
-- Games no longer run too fast. The emulator now runs at the PC Engine's native frame rate of 59.83 fps instead of 60 fps, and a frame-pacing bug that let demanding scenes run unthrottled (up to ~65 fps, speeding up music and gameplay) has been fixed. Audio stays in sync and is unaffected.
+- The emulator now runs at the PC Engine's native frame rate of 59.83 fps instead of 60 fps, and a frame-pacing bug that let demanding scenes run unthrottled (up to ~65 fps, speeding up music and gameplay) has been fixed. Audio stays in sync and is unaffected.
 - Fixed graphical glitches in SuperGrafx games:
 	- Ghouls 'n Ghosts
 	- Aldynes
