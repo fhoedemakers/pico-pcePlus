@@ -30,6 +30,10 @@ SuperGrafx graphics fixes, smoother audio, and other improvements.
 - Greatly reduced crackling audio in CD titles on certain configurations.
 - The FPS overlay now shows a per-second average instead of a fluctuating per-frame estimate.
 
+## Other
+
+- DVI mode is temporarily unavailable in this release, as it was causing too many issues. We hope to bring it back in a future update.
+
 ## For developers
 
 - Added a Linux host test harness (`hosttest/`) that runs the emulator core on a PC for faster debugging — no Pico or flashing needed. See `hosttest/README.md`.
