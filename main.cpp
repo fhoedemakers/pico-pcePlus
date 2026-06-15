@@ -99,7 +99,7 @@ const int8_t g_settings_visibility_pce[MOPT_COUNT] = {
     1,                               // FPS Overlay
     0,                               // Audio Enable
     0,                               // Frame Skip
-    (HSTX && ENABLEDVI),             // Display Mode HDMI or DVI
+    0 , //(HSTX && ENABLEDVI),             // Display Mode HDMI or DVI
     (EXT_AUDIO_IS_ENABLED),          // External Audio
     1,                               // Font Color
     1,                               // Font Back Color
