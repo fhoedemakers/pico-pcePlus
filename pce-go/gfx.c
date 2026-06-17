@@ -1148,29 +1148,26 @@ gfx_term(void)
 */
 void __not_in_flash_func(gfx_irq)(int type)
 {
-	/* If IRQ, push it on the stack */
+	/* Set the status bit immediately. On real PCE the status register
+	 * reflects whether each event has occurred, independent of the IRQ
+	 * line. Davis Cup Tennis (USA) masks all IRQs ($1402=0x07) and polls
+	 * the status register for the VRAM-VRAM-DMA-done (DV, bit 4) bit
+	 * after writing LENR. With the old "drain only when CPU.irq_lines
+	 * is clear" logic the bit got buried in pending_irqs forever and
+	 * the game hung on a black screen waiting for it. Now the bit lands
+	 * in status the moment the event happens; CPU.irq_lines is asserted
+	 * so a non-masked CPU also services the IRQ on its next step. */
 	if (type >= 0) {
-		PCE.VDC.pending_irqs <<= 4;
-		PCE.VDC.pending_irqs |= type & 0xF;
+		PCE.VDC.status |= 1 << type;
+		CPU.irq_lines |= INT_IRQ1;
 	}
 
-	/* Pop the first pending vdc interrupt only if CPU.irq_lines is clear */
-	int pos = 28;
-	while (!(CPU.irq_lines & INT_IRQ1) && PCE.VDC.pending_irqs) {
-		if (PCE.VDC.pending_irqs >> pos) {
-			PCE.VDC.status |= 1 << (PCE.VDC.pending_irqs >> pos);
-			PCE.VDC.pending_irqs &= ~(0xF << pos);
-			CPU.irq_lines |= INT_IRQ1; // Notify the CPU
-		}
-		pos -= 4;
-	}
-
-	// SuperGrafx: VDC2 shares the same IRQ1 line. Drain its independent stack
-	// the same way. CPU disambiguates VDC1/VDC2 sources by reading both status
-	// registers ($1FE000 and $1FE010).
+	/* SGX: VDC2 SATB/raster/sprite-collision paths push onto
+	 * PCE.VDC2.pending_irqs directly and call gfx_irq(-1) to merge.
+	 * Drain that stack unconditionally — same fix as VDC1 above. */
 	if (PCE.VPC.is_sgx) {
-		pos = 28;
-		while (!(CPU.irq_lines & INT_IRQ1) && PCE.VDC2.pending_irqs) {
+		int pos = 28;
+		while (PCE.VDC2.pending_irqs && pos >= 0) {
 			if (PCE.VDC2.pending_irqs >> pos) {
 				PCE.VDC2.status |= 1 << (PCE.VDC2.pending_irqs >> pos);
 				PCE.VDC2.pending_irqs &= ~(0xF << pos);

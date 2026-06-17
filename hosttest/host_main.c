@@ -77,6 +77,27 @@ int main(int argc, char **argv)
 	if (getenv("PCE_SOLO_VDC"))
 		pce_dbg_solo_vdc = atoi(getenv("PCE_SOLO_VDC"));
 
+	// PCE_PRESS_KEYS=<frame>:<hex>[,<frame>:<hex>...] — hold the given JOY_* mask
+	// for 10 frames at each frame, in addition to PCE_PRESS_RUN/PCE_HOLD_FIRE.
+	struct { int frame; uint8_t mask; } keys[16];
+	int keys_n = 0;
+	if (getenv("PCE_PRESS_KEYS")) {
+		char buf[256];
+		strncpy(buf, getenv("PCE_PRESS_KEYS"), sizeof(buf) - 1);
+		buf[sizeof(buf) - 1] = 0;
+		char *tok = strtok(buf, ",");
+		while (tok && keys_n < 16) {
+			char *colon = strchr(tok, ':');
+			if (colon) {
+				*colon = 0;
+				keys[keys_n].frame = atoi(tok);
+				keys[keys_n].mask = (uint8_t)strtoul(colon + 1, NULL, 16);
+				keys_n++;
+			}
+			tok = strtok(NULL, ",");
+		}
+	}
+
 	const char *ext = strrchr(rom_path, '.');
 	int is_sgx = ext && strcasecmp(ext, ".sgx") == 0;
 
@@ -109,6 +130,10 @@ int main(int argc, char **argv)
 			hold_fire = getenv("PCE_HOLD_FIRE") ? atoi(getenv("PCE_HOLD_FIRE")) : -1;
 		if (hold_fire >= 0 && frame >= hold_fire && (frame & 4))
 			PCE.Joypad.regs[0] |= JOY_A;
+		for (int k = 0; k < keys_n; k++) {
+			if (frame >= keys[k].frame && frame < keys[k].frame + 10)
+				PCE.Joypad.regs[0] |= keys[k].mask;
+		}
 		pce_run();
 		if (dump_every > 0 && frame % dump_every == 0)
 			dump_ppm(outdir, frame);

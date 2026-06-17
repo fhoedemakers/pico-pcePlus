@@ -55,6 +55,7 @@ firmware. Frames are written as `outdir/frame_NNNNN.ppm`.
 |---|---|
 | `PCE_PRESS_RUN=<frame>` | tap RUN for 10 frames starting there (gets past title screens) |
 | `PCE_HOLD_FIRE=<frame>` | autofire button II (4 frames on / 4 off) from that frame on |
+| `PCE_PRESS_KEYS=<f>:<hex>[,<f>:<hex>...]` | hold an arbitrary `JOY_*` bitmask for 10 frames at each given frame (up to 16 entries). Composes with `PCE_PRESS_RUN`/`PCE_HOLD_FIRE`. Masks: I=01, II=02, SELECT=04, RUN=08, UP=10, RIGHT=20, DOWN=40, LEFT=80. Example: `1100:01,1300:40,1500:01` taps I, then DOWN, then I — useful for navigating menus past the title screen. |
 | `PCE_SOLO_VDC=1` or `2` | SGX only: mixer outputs just VDC1 or VDC2 — identifies which layer holds what |
 | `PCE_DUMP_REGS=1` | print VDC1/VDC2/VPC registers + VRAM nonzero counts every 100 frames |
 | `PCE_DUMP_VRAM=1` | write `vram1.bin` `vram2.bin` `spram1.bin` `spram2.bin` to outdir at exit |
