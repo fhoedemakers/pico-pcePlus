@@ -157,8 +157,11 @@ LoadCard(uint8_t *data, size_t size)
 		offset, (int)PCE.ROM_SIZE, (int)ROM_MASK, (int)PCE.ROM_CRC);
 
 	while (romFlags[IDX].CRC) {
-		if (PCE.ROM_CRC == romFlags[IDX].CRC)
+		if (PCE.ROM_CRC == romFlags[IDX].CRC) {
+			MESSAGE_INFO("Matched known rom: %s (flags=%04X)\n",
+				romFlags[IDX].Name, romFlags[IDX].Flags);
 			break;
+		}
 		IDX++;
 	}
 
