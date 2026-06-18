@@ -59,6 +59,7 @@ firmware. Frames are written as `outdir/frame_NNNNN.ppm`.
 | `PCE_SOLO_VDC=1` or `2` | SGX only: mixer outputs just VDC1 or VDC2 — identifies which layer holds what |
 | `PCE_DUMP_REGS=1` | print VDC1/VDC2/VPC registers + VRAM nonzero counts every 100 frames |
 | `PCE_DUMP_VRAM=1` | write `vram1.bin` `vram2.bin` `spram1.bin` `spram2.bin` to outdir at exit |
+| `PCE_QUIRK=<hex>` | OR bits into `PCE.Quirks` after `LoadCard`. Needed because the hosttest `crc32_le` stub returns 0, so per-CRC quirks from `romFlags[]` never auto-trigger here. E.g. `PCE_QUIRK=0x1000` enables `PCE_QUIRK_HW_VDC`. On Pico the real CRC is computed and this env var is ignored. |
 
 The `.bin` dumps are little-endian uint16 arrays (0x8000 words VRAM, 256 words
 SPRAM) — decode BAT/SAT tables with a few lines of `struct.unpack`.

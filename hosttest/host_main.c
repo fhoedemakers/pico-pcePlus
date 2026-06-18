@@ -114,8 +114,15 @@ int main(int argc, char **argv)
 	if (InitPCE(44100, true)) { fprintf(stderr, "InitPCE failed\n"); return 1; }
 	if (LoadCard(rom, size)) { fprintf(stderr, "LoadCard failed\n"); return 1; }
 
-	printf("ROM %s loaded (%ld bytes, sgx=%d). Running %d frames.\n",
-		rom_path, size, is_sgx, total_frames);
+	// In hosttest the crc32_le() stub returns 0, so per-CRC quirks set by
+	// LoadCard never trigger. Allow forcing the bitmask via PCE_QUIRK=<hex>
+	// (e.g. PCE_QUIRK=0x1000 to enable PCE_QUIRK_HW_VDC). On Pico the real
+	// CRC is computed and this env var is ignored.
+	if (getenv("PCE_QUIRK"))
+		PCE.Quirks |= strtoul(getenv("PCE_QUIRK"), NULL, 0);
+
+	printf("ROM %s loaded (%ld bytes, sgx=%d, quirks=0x%x). Running %d frames.\n",
+		rom_path, size, is_sgx, (unsigned)PCE.Quirks, total_frames);
 
 	for (int frame = 0; frame < total_frames; frame++) {
 		if (press_run >= 0) {
