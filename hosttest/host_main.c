@@ -125,12 +125,15 @@ int main(int argc, char **argv)
 		if (LoadCard(rom, size)) { fprintf(stderr, "LoadCard failed\n"); return 1; }
 	}
 
-	// In hosttest the crc32_le() stub returns 0, so per-CRC quirks set by
-	// LoadCard never trigger. Allow forcing the bitmask via PCE_QUIRK=<hex>
-	// (e.g. PCE_QUIRK=0x1000 to enable PCE_QUIRK_HW_VDC). On Pico the real
-	// CRC is computed and this env var is ignored.
+	// PCE_QUIRK=<hex> ORs bits into PCE.Quirks (force-on a quirk that the
+	// CRC match didn't set). PCE_QUIRK_CLEAR=<hex> masks bits out (turn off
+	// a quirk that the CRC match did set, e.g. to isolate which sub-bit of
+	// PCE_QUIRK_HW_VDC causes a regression). On Pico the CRC is real and
+	// these env vars are not consulted.
 	if (getenv("PCE_QUIRK"))
 		PCE.Quirks |= strtoul(getenv("PCE_QUIRK"), NULL, 0);
+	if (getenv("PCE_QUIRK_CLEAR"))
+		PCE.Quirks &= ~strtoul(getenv("PCE_QUIRK_CLEAR"), NULL, 0);
 
 	printf("Loaded %s (sgx=%d, cd=%d, quirks=0x%x). Running %d frames.\n",
 		rom_path, is_sgx, is_cd, (unsigned)PCE.Quirks, total_frames);

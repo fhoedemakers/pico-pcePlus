@@ -318,14 +318,17 @@ extern uint8_t *PageW[8];
 #define DMA_TRANSFER_PENDING 0x40
 
 // Per-ROM quirk bits stored in PCE.Quirks (matched by CRC32 at LoadCard).
-// PCE_QUIRK_HW_VDC enables a bundle of more hardware-accurate VDC/IRQ
-// behaviours that match Mesen2: DV-IRQ gated on DCR.1, VRAM-VRAM DMA
-// charges CPU cycles, and CLI/PLP/RTI dispatch pending IRQs immediately
-// instead of waiting for the next scanline boundary. Default-off to
-// avoid regressing games that rely on the legacy (less accurate) flow;
-// enable per-CRC for titles that need it (e.g. Cadash USA: dialog box
-// ghosting at the bottom of the screen during cutscenes).
-#define PCE_QUIRK_HW_VDC 0x1000
+// The HW_VDC bundle below brings VDC/IRQ behaviour closer to Mesen2 /
+// real hardware. Each part is split out so individual sub-bits can be
+// flipped per-ROM if the full bundle regresses on a specific title.
+//
+// Default-off to avoid regressing games that rely on the legacy (less
+// accurate) flow. Cadash (USA) needs all three; if one of them turns
+// out to break other games we can toggle per-CRC in romFlags[].
+#define PCE_QUIRK_HW_VDC_DV_GATE   0x1000  // gate DV IRQ on DCR.1 (Mesen2 VramVramIrqEnabled)
+#define PCE_QUIRK_HW_VDC_DMA_CYC   0x2000  // charge CPU cycles for VRAM-VRAM DMA (~8 per word)
+#define PCE_QUIRK_HW_VDC_INST_IRQ  0x4000  // dispatch pending IRQs immediately after CLI/PLP/RTI
+#define PCE_QUIRK_HW_VDC           (PCE_QUIRK_HW_VDC_DV_GATE | PCE_QUIRK_HW_VDC_DMA_CYC | PCE_QUIRK_HW_VDC_INST_IRQ)
 
 /**
  * Exported Functions

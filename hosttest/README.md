@@ -69,7 +69,8 @@ takes the CD path through `LoadDisc()`. Everything else goes through
 | `PCE_SOLO_VDC=1` or `2` | SGX only: mixer outputs just VDC1 or VDC2 — identifies which layer holds what |
 | `PCE_DUMP_REGS=1` | print VDC1/VDC2/VPC registers + VRAM nonzero counts every 100 frames |
 | `PCE_DUMP_VRAM=1` | write `vram1.bin` `vram2.bin` `spram1.bin` `spram2.bin` to outdir at exit |
-| `PCE_QUIRK=<hex>` | OR bits into `PCE.Quirks` after `LoadCard`. Needed because the hosttest `crc32_le` stub returns 0, so per-CRC quirks from `romFlags[]` never auto-trigger here. E.g. `PCE_QUIRK=0x1000` enables `PCE_QUIRK_HW_VDC`. On Pico the real CRC is computed and this env var is ignored. |
+| `PCE_QUIRK=<hex>` | OR bits into `PCE.Quirks` after `LoadCard`. Useful for force-enabling a quirk on a ROM whose CRC isn't in `romFlags[]`. E.g. `PCE_QUIRK=0x1000` enables `PCE_QUIRK_HW_VDC_DV_GATE`. |
+| `PCE_QUIRK_CLEAR=<hex>` | AND-NOT bits out of `PCE.Quirks` after CRC match. Use to isolate which sub-bit of a bundle causes a regression. E.g. `PCE_QUIRK_CLEAR=0x4000` on Cadash disables `PCE_QUIRK_HW_VDC_INST_IRQ` while leaving DV-gating + DMA-cycles on. On Pico both env vars are ignored. |
 | `PCE_SD_ROOT=<dir>` | CD only. Root that any **absolute** FatFs path is reinterpreted relative to. The firmware lays out `/bios/<systemcard>.pce` and per-game folders at the SD root; replicate that under `$PCE_SD_ROOT` on host. Default: `.` (relative paths pass through unchanged, so HuCard runs are unaffected). |
 
 The `.bin` dumps are little-endian uint16 arrays (0x8000 words VRAM, 256 words

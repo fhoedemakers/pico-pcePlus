@@ -39,14 +39,14 @@ static const UBYTE bcd2bin[0x100] = {
 // at PceCpu::Exec). Definition is later in this file.
 static ALWAYS_INLINE void interrupt(unsigned type);
 
-// When the HW_VDC quirk is set, an instruction that just cleared the I
-// flag (CLI / PLP / RTI) should dispatch a pending IRQ within a few cycles
-// instead of waiting up to a full scanline for the next h6280_run boundary.
-// Cadash's VBlank handler executes CLI and immediately expects the queued
-// RR IRQ to fire; the scanline-quantized delay drifts its per-frame DMA
-// pipeline and produces the bottom-of-screen dialog ghost.
+// When the HW_VDC_INST_IRQ quirk is set, an instruction that just cleared
+// the I flag (CLI / PLP / RTI) should dispatch a pending IRQ within a few
+// cycles instead of waiting up to a full scanline for the next h6280_run
+// boundary. Cadash's VBlank handler executes CLI and immediately expects
+// the queued RR IRQ to fire; the scanline-quantized delay drifts its
+// per-frame DMA pipeline and produces the bottom-of-screen dialog ghost.
 #define PCE_CHECK_PENDING_IRQ_AFTER_I_CLEAR() do {                          \
-	if (PCE.Quirks & PCE_QUIRK_HW_VDC) {                                    \
+	if (PCE.Quirks & PCE_QUIRK_HW_VDC_INST_IRQ) {                           \
 		unsigned _irq = CPU.irq_lines & ~CPU.irq_mask & INT_MASK;           \
 		if (!(CPU.P & FL_I) && _irq) interrupt(_irq);                       \
 	}                                                                       \
