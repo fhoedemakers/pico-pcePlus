@@ -96,6 +96,8 @@ save_var_t SgxSaveStateVars[] =
 #define TWO_PART_ROM 0x0001
 #define ONBOARD_RAM  0x0100
 #define US_ENCODED   0x0010
+// Runtime quirk: see PCE_QUIRK_HW_VDC in pce.h.
+#define HW_VDC       PCE_QUIRK_HW_VDC
 
 static const struct {
 	const uint32_t CRC;
@@ -107,6 +109,7 @@ static const struct {
 	{0x55E9630D, "Legend of Hero Tonma", US_ENCODED},
 	{0x083C956A, "Populous", ONBOARD_RAM},
 	{0x0A9ADE99, "Populous", ONBOARD_RAM},
+	{0xBB0B3AEF, "Cadash (USA)", HW_VDC},
 	{0x00000000, "Unknown", 0},
 };
 
@@ -152,6 +155,13 @@ LoadCard(uint8_t *data, size_t size)
 	}
 
 	MESSAGE_INFO("Game Name: %s\n", romFlags[IDX].Name);
+
+	// Expose the matched flags to runtime code (gfx_irq gating, DMA cycle
+	// cost, per-instruction IRQ dispatch — see PCE_QUIRK_HW_VDC in pce.h).
+	// Load-time fixups (US_ENCODED, TWO_PART_ROM, ONBOARD_RAM) keep their
+	// existing inline behaviour below; PCE.Quirks just mirrors them for
+	// completeness and lets runtime code check the same bitmask.
+	PCE.Quirks = romFlags[IDX].Flags;
 
 	// US Encrypted
 	if ((romFlags[IDX].Flags & US_ENCODED) || PCE.ROM_DATA[0x1FFF] < 0xE0)
