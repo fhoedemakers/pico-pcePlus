@@ -11,6 +11,7 @@
 #include "pce-go.h"
 #include "pce.h"
 #include "gfx.h"
+#include "cd.h"
 
 int osd_gfx_render_line;
 int pce_dbg_solo_vdc; // 0=normal mix, 1=VDC1 only, 2=VDC2 only (PCE_HOST_DEBUG)
@@ -100,19 +101,29 @@ int main(int argc, char **argv)
 
 	const char *ext = strrchr(rom_path, '.');
 	int is_sgx = ext && strcasecmp(ext, ".sgx") == 0;
-
-	FILE *f = fopen(rom_path, "rb");
-	if (!f) { perror(rom_path); return 1; }
-	fseek(f, 0, SEEK_END);
-	long size = ftell(f);
-	fseek(f, 0, SEEK_SET);
-	uint8_t *rom = malloc(size);
-	if (fread(rom, 1, size, f) != (size_t)size) { fprintf(stderr, "short read\n"); return 1; }
-	fclose(f);
+	int is_cd  = ext && (strcasecmp(ext, ".cue") == 0 || strcasecmp(ext, ".chd") == 0);
 
 	SetSgxModePCE(is_sgx);
 	if (InitPCE(44100, true)) { fprintf(stderr, "InitPCE failed\n"); return 1; }
-	if (LoadCard(rom, size)) { fprintf(stderr, "LoadCard failed\n"); return 1; }
+
+	if (is_cd) {
+		// CD path: LoadDisc reads the CUE/CHD via the FatFs shim (which maps
+		// absolute paths under $PCE_SD_ROOT — default ".") and scans /bios/
+		// for a System Card. The path argv[1] passes through verbatim and
+		// becomes the FatFs path; if it's absolute, $PCE_SD_ROOT applies.
+		int rc = LoadDisc(rom_path);
+		if (rc != 0) { fprintf(stderr, "LoadDisc(%s) failed (rc=%d)\n", rom_path, rc); return 1; }
+	} else {
+		FILE *f = fopen(rom_path, "rb");
+		if (!f) { perror(rom_path); return 1; }
+		fseek(f, 0, SEEK_END);
+		long size = ftell(f);
+		fseek(f, 0, SEEK_SET);
+		uint8_t *rom = malloc(size);
+		if (fread(rom, 1, size, f) != (size_t)size) { fprintf(stderr, "short read\n"); return 1; }
+		fclose(f);
+		if (LoadCard(rom, size)) { fprintf(stderr, "LoadCard failed\n"); return 1; }
+	}
 
 	// In hosttest the crc32_le() stub returns 0, so per-CRC quirks set by
 	// LoadCard never trigger. Allow forcing the bitmask via PCE_QUIRK=<hex>
@@ -121,8 +132,8 @@ int main(int argc, char **argv)
 	if (getenv("PCE_QUIRK"))
 		PCE.Quirks |= strtoul(getenv("PCE_QUIRK"), NULL, 0);
 
-	printf("ROM %s loaded (%ld bytes, sgx=%d, quirks=0x%x). Running %d frames.\n",
-		rom_path, size, is_sgx, (unsigned)PCE.Quirks, total_frames);
+	printf("Loaded %s (sgx=%d, cd=%d, quirks=0x%x). Running %d frames.\n",
+		rom_path, is_sgx, is_cd, (unsigned)PCE.Quirks, total_frames);
 
 	for (int frame = 0; frame < total_frames; frame++) {
 		if (press_run >= 0) {
@@ -142,6 +153,17 @@ int main(int argc, char **argv)
 				PCE.Joypad.regs[0] |= keys[k].mask;
 		}
 		pce_run();
+		// CD-DA / ADPCM keepalive. The generators advance audio_cur_lba,
+		// fire end-of-track IRQs, drive the $1805 sample latch, and tick
+		// the ADPCM playing flag. Games hang waiting on those side
+		// effects if we never call them. Samples themselves go nowhere
+		// (no audio sink); 44100/60 ≈ 735 samples/frame matches firmware.
+		if (CD.cd_attached) {
+			static int16_t cd_buf[735 * 2];
+			cd_audio_update();
+			cd_audio_generate_samples(cd_buf, 735);
+			cd_adpcm_generate_samples(cd_buf, 735, 44100);
+		}
 		if (dump_every > 0 && frame % dump_every == 0)
 			dump_ppm(outdir, frame);
 		if (getenv("PCE_DUMP_REGS") && frame % 100 == 0) {
@@ -183,6 +205,8 @@ int main(int argc, char **argv)
 		snprintf(p, sizeof(p), "%s/spram2.bin", outdir);
 		d = fopen(p, "wb"); fwrite(PCE.SPRAM2, 2, 256, d); fclose(d);
 	}
+	if (CD.cd_attached)
+		cd_term();
 	printf("done.\n");
 	return 0;
 }

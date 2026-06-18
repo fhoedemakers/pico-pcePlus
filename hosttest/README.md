@@ -14,9 +14,12 @@ bullets) in a single afternoon after hardware-side debugging had stalled.
 
 | File | Purpose |
 |---|---|
-| `host_main.c` | main loop, OSD callbacks, full-frame buffer, PPM/register/VRAM dumps |
-| `stubs.c` | FatFs + CD-subsystem no-op stubs, `frens_f_malloc` → plain `malloc` |
-| `shim/pico.h`, `shim/pico/time.h`, `shim/ff.h` | header shims so the core compiles untouched |
+| `host_main.c` | main loop, OSD callbacks, full-frame buffer, PPM/register/VRAM dumps, CD audio/ADPCM drain |
+| `stubs.c` | `frens_f_malloc/free` → plain `malloc/free` (everything else is real code) |
+| `fatfs_host.c` | FatFs API on top of POSIX (`fopen`/`opendir`/...) with `$PCE_SD_ROOT`-prefix path translation |
+| `cd_chd_alloc_host.c` | libchdr `chdr_libchdr_*` wrappers → libc; undef'd before `<stdlib.h>` to dodge the global force-include |
+| `shim/pico.h`, `shim/pico/time.h`, `shim/pico/mutex.h`, `shim/ff.h` | header shims so the core compiles untouched |
+| `build.sh` | mirrors `external/libchdr_pico.cmake` for the host so libchdr links the same way |
 | `ppm2png.py` | PPM → PNG converter, Python stdlib only (no PIL/ImageMagick needed) |
 
 ## Build
@@ -24,30 +27,37 @@ bullets) in a single afternoon after hardware-side debugging had stalled.
 From the repo root:
 
 ```sh
-gcc -O1 -g -fsanitize=address -DPCE_HOST_DEBUG -I hosttest/shim -I pce-go \
-  -o hosttest/pce_host hosttest/host_main.c hosttest/stubs.c \
-  pce-go/pce-go.c pce-go/pce.c pce-go/gfx.c pce-go/h6280.c pce-go/psg.c -lm
+hosttest/build.sh   # produces hosttest/pce_host
 ```
 
-- AddressSanitizer is intentional: it doubles as a memory-bug detector for the
-  core (the per-scanline refactor history shows how easy buffer overruns are
-  to introduce). Drop `-fsanitize=address` for faster runs.
-- `-DPCE_HOST_DEBUG` enables the VDC-solo hook in `mix_vpc_scanline`
-  (`pce-go/gfx.c`). The firmware build never defines it, so the device is
-  completely unaffected.
+The script compiles `pce-go/cd.c`, `pce-go/cd_chd.c` and the libchdr sources
+from `external/libchdr/` directly into the binary, with the same defines the
+firmware cmake uses (`ENABLE_CHD=1`, `WANT_RAW_DATA_SECTOR=1`, miniz no-stdio,
+etc.). The defines `PCE_HOST_DEBUG` (VDC-solo hook in `gfx.c`) and
+`PICO_RP2350=1` (so `LoadDisc()` allocates the CD-DA ring) are host-only.
+AddressSanitizer (`-fsanitize=address`) is intentional; drop it from the
+script for faster runs.
 
 ## Run
 
 ```sh
-./hosttest/pce_host <rom> <total-frames> <dump-every-N> [outdir]
+./hosttest/pce_host <rom-or-cue-or-chd> <total-frames> <dump-every-N> [outdir]
 
-# examples
+# HuCard
 ./hosttest/pce_host "Madou King Granzort (Japan).sgx" 1300 100 hosttest/out
+
+# CD: lay out files under one root, then run with PCE_SD_ROOT set.
+#   $ROOT/bios/Super CD-ROM System (Japan) (v3.0).pce
+#   $ROOT/games/foo/foo.cue   (+ tracks alongside)
+PCE_SD_ROOT=/path/to/sd PCE_PRESS_RUN=300 \
+  ./hosttest/pce_host "/games/foo/foo.cue" 2000 100 hosttest/out_cd
+
 python3 hosttest/ppm2png.py hosttest/out/frame_01200.ppm   # -> .png next to it
 ```
 
-A `.sgx` extension auto-enables SuperGrafx mode (second VDC), same as the
-firmware. Frames are written as `outdir/frame_NNNNN.ppm`.
+Extension dispatch: `.sgx` enables SuperGrafx (second VDC); `.cue` or `.chd`
+takes the CD path through `LoadDisc()`. Everything else goes through
+`LoadCard()`. Frames are written as `outdir/frame_NNNNN.ppm`.
 
 ## Environment variables
 
@@ -60,6 +70,7 @@ firmware. Frames are written as `outdir/frame_NNNNN.ppm`.
 | `PCE_DUMP_REGS=1` | print VDC1/VDC2/VPC registers + VRAM nonzero counts every 100 frames |
 | `PCE_DUMP_VRAM=1` | write `vram1.bin` `vram2.bin` `spram1.bin` `spram2.bin` to outdir at exit |
 | `PCE_QUIRK=<hex>` | OR bits into `PCE.Quirks` after `LoadCard`. Needed because the hosttest `crc32_le` stub returns 0, so per-CRC quirks from `romFlags[]` never auto-trigger here. E.g. `PCE_QUIRK=0x1000` enables `PCE_QUIRK_HW_VDC`. On Pico the real CRC is computed and this env var is ignored. |
+| `PCE_SD_ROOT=<dir>` | CD only. Root that any **absolute** FatFs path is reinterpreted relative to. The firmware lays out `/bios/<systemcard>.pce` and per-game folders at the SD root; replicate that under `$PCE_SD_ROOT` on host. Default: `.` (relative paths pass through unchanged, so HuCard runs are unaffected). |
 
 The `.bin` dumps are little-endian uint16 arrays (0x8000 words VRAM, 256 words
 SPRAM) — decode BAT/SAT tables with a few lines of `struct.unpack`.
@@ -67,9 +78,18 @@ SPRAM) — decode BAT/SAT tables with a few lines of `struct.unpack`.
 ## Caveats
 
 - Host runs are fully deterministic: no PSRAM garbage, no input-timing
-  variation. A bug that is *intermittent* on the device usually shows up here
-  as its always-broken variant.
-- CD games cannot load (FatFs/CD stubs fail by design).
-- `crc32_le` is stubbed to 0 outside RETRO_GO, so `romFlags` CRC matching
-  never hits — keep this in mind when debugging per-game flag behavior.
-- Audio is stubbed entirely (`osd_psg_*` are no-ops).
+  variation, no SD/QMI contention. Bugs that are *intermittent* on the device
+  usually show up here as their always-broken variant — but timing-dependent
+  bugs (HSTX crackle, CHD prefetch underruns, audio-clock PLL behavior) do
+  **not** reproduce here. Use the host for logic bugs (CUE parsing, SCSI
+  command sequencing, ADPCM decoder, BIOS interactions); keep the device
+  for sink/SD/PSRAM-latency bugs.
+- BIOS CRC is computed correctly (cd.c's own `crc32_update`), so System
+  Card / Arcade Card variant detection works on host. The `crc32_le` stub
+  in `pce-go.c` still returns 0 though, so `romFlags`-style per-game quirks
+  don't auto-fire — use `PCE_QUIRK=` for those.
+- PSG (`osd_psg_*`) is still stubbed. CD-DA and ADPCM **are** generated each
+  frame to keep the audio state machines moving (otherwise games hang on
+  end-of-track IRQs or ADPCM-playing polling) but the samples are discarded.
+- The host harness is single-threaded; `pico/mutex.h` is a no-op shim. The
+  sd_mutex contention paths in `cd_audio_update` never engage here.
