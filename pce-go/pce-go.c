@@ -109,7 +109,7 @@ static const struct {
 	{0x55E9630D, "Legend of Hero Tonma", US_ENCODED},
 	{0x083C956A, "Populous", ONBOARD_RAM},
 	{0x0A9ADE99, "Populous", ONBOARD_RAM},
-	// Cadash (USA) — DV_GATE prevents the spurious DV IRQ that ran the
+	// Cadash (USA/JP) — DV_GATE prevents the spurious DV IRQ that ran the
 	// game's DV handler and stomped scroll state; DMA_CYC budgets enough
 	// CPU cycles for the DMA so the game's RR-handler timing settles.
 	// User-verified on Pico (2026-06-18): minimal pair fixes the dialog
@@ -117,6 +117,7 @@ static const struct {
 	// in place of DMA_CYC but touches more of the CPU loop — prefer
 	// DMA_CYC for surgical risk.
 	{0xBB0B3AEF, "Cadash (USA)", PCE_QUIRK_HW_VDC_DV_GATE | PCE_QUIRK_HW_VDC_DMA_CYC},
+	{0x8DC0D85F, "Cadash (JP)", PCE_QUIRK_HW_VDC_DV_GATE | PCE_QUIRK_HW_VDC_DMA_CYC},
 	{0x00000000, "Unknown", 0},
 };
 
