@@ -219,7 +219,11 @@ LoadCard(uint8_t *data, size_t size)
 	if (PCE.ROM_SIZE >= 192)
 		PCE.MemoryMapW[0x00] = PCE.IOAREA;
 
-	ResetPCE(0);
+	// Hard reset on HuCard load — matches LoadDisc() and clears VRAM/VRAM2/
+	// SPRAM/SPRAM2/Palette/RAM. VRAM2 lives in PSRAM (frens_f_malloc, no zero
+	// init), so without this an SGX title sees previous-game / firmware
+	// leftovers in its VDC2 working memory (intermittent Granzort title bg).
+	ResetPCE(1);
 
 	return 0;
 }
@@ -376,8 +380,7 @@ LoadDisc(const char *cue_path)
 	CD.acd_ram        = (uint8_t *)frens_f_malloc(ACD_RAM_SIZE);
 	CD.bram           = (uint8_t *)frens_f_malloc(BRAM_PAGE_SIZE);
 #if PICO_RP2350
-	static uint8_t audio_ring_sram[4 * CD_RAW_SECTOR_SIZE];
-	CD.audio_ring_buf = audio_ring_sram;
+	CD.audio_ring_buf = (uint8_t *)frens_f_malloc(CD_AUDIO_RING_SECTORS * CD_RAW_SECTOR_SIZE);
 #endif
 	if (!CD.cd_ram || !CD.scd_ram || !CD.adpcm_ram || !CD.acd_ram || !CD.bram
 	    || !CD.audio_ring_buf) {

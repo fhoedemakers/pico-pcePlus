@@ -842,8 +842,21 @@ static void __not_in_flash_func(mix_vpc_scanline)(uint8_t *out, int width)
 {
 	const uint8_t  backdrop = PCE.Palette[0];
 	const uint32_t bd_4 = 0x01010101u * backdrop;
-	uint16_t w1 = PCE.VPC.window1;
-	uint16_t w2 = PCE.VPC.window2;
+#ifdef PCE_HOST_DEBUG
+	// Host harness: solo one VDC's output to identify which layer holds what.
+	extern int pce_dbg_solo_vdc;
+	if (pce_dbg_solo_vdc) {
+		mix_segment(out, 0, width, pce_dbg_solo_vdc == 1 ? 0x01 : 0x02, bd_4, backdrop);
+		return;
+	}
+#endif
+	// Window registers are in VCE dot coordinates where the first visible
+	// pixel is at 16 — convert to screen X (Mesen2: max(0, Window - 16)).
+	// Values <= 16 therefore create no window region.
+	int w1 = (int)PCE.VPC.window1 - 16;
+	int w2 = (int)PCE.VPC.window2 - 16;
+	if (w1 < 0) w1 = 0;
+	if (w2 < 0) w2 = 0;
 
 	// No windows: one segment covers everything.
 	if (w1 == 0 && w2 == 0) {
@@ -984,28 +997,38 @@ void __not_in_flash_func(gfx_latch_context)(int force)
 // when running in SGX mode. line_counter is the visible-area-relative scanline
 // number (line_counter == 0 is the first visible line).
 //
-// Each tick: if line_counter == 0 OR the corresponding BYR-pending flag is
-// set, copy the current BYR into bg_scroll_y without incrementing (matches
-// Mesen2's "latch new BYR, don't advance"). Otherwise bg_scroll_y++. The
-// gfx_context*.scroll_y fields are then set to (bg_scroll_y - line_counter)
+// Each tick: on line_counter == 0 copy BYR into bg_scroll_y without
+// incrementing. On any other line, first apply a pending BYR write if one
+// occurred, then ALWAYS increment — matching Mesen2 PceVdc::IncScrollY, where
+// the latch advances even on the line a new BYR is applied. This is the
+// hardware "BYR+1" quirk: a mid-frame BYR write takes effect at value+1.
+// The gfx_context*.scroll_y fields are then set to (bg_scroll_y - line_counter)
 // so draw_tiles_sgx_line's existing `y = Y + scroll_y` produces the right
 // per-scanline BG row index.
 void __not_in_flash_func(gfx_inc_scroll_y_sgx)(int line_counter)
 {
 	// VDC1
-	if (line_counter == 0 || PCE.VPC.byr_pending_vdc1) {
+	if (line_counter == 0) {
 		PCE.VPC.bg_scroll_y_vdc1 = IO_VDC_REG[BYR].W;
 		PCE.VPC.byr_pending_vdc1 = 0;
 	} else {
+		if (PCE.VPC.byr_pending_vdc1) {
+			PCE.VPC.bg_scroll_y_vdc1 = IO_VDC_REG[BYR].W;
+			PCE.VPC.byr_pending_vdc1 = 0;
+		}
 		PCE.VPC.bg_scroll_y_vdc1 = (PCE.VPC.bg_scroll_y_vdc1 + 1) & 0x1FF;
 	}
 	gfx_context.scroll_y = (int)PCE.VPC.bg_scroll_y_vdc1 - line_counter;
 
 	// VDC2
-	if (line_counter == 0 || PCE.VPC.byr_pending_vdc2) {
+	if (line_counter == 0) {
 		PCE.VPC.bg_scroll_y_vdc2 = PCE.VDC2.regs[BYR].W;
 		PCE.VPC.byr_pending_vdc2 = 0;
 	} else {
+		if (PCE.VPC.byr_pending_vdc2) {
+			PCE.VPC.bg_scroll_y_vdc2 = PCE.VDC2.regs[BYR].W;
+			PCE.VPC.byr_pending_vdc2 = 0;
+		}
 		PCE.VPC.bg_scroll_y_vdc2 = (PCE.VPC.bg_scroll_y_vdc2 + 1) & 0x1FF;
 	}
 	gfx_context_vdc2.scroll_y = (int)PCE.VPC.bg_scroll_y_vdc2 - line_counter;
@@ -1102,6 +1125,12 @@ gfx_reset(bool hard)
 {
 	last_line_counter = 0;
 	line_counter = 0;
+	// Clear the VDC1/VDC2 latched scroll/control mirrors. Without this, a
+	// previous game's scroll_x / scroll_y / control leaks into the first
+	// frame after a warm reload — visible until the new game's next BXR/BYR/
+	// CR write re-latches the context.
+	memset(&gfx_context, 0, sizeof(gfx_context));
+	memset(&gfx_context_vdc2, 0, sizeof(gfx_context_vdc2));
 }
 
 
@@ -1119,29 +1148,26 @@ gfx_term(void)
 */
 void __not_in_flash_func(gfx_irq)(int type)
 {
-	/* If IRQ, push it on the stack */
+	/* Set the status bit immediately. On real PCE the status register
+	 * reflects whether each event has occurred, independent of the IRQ
+	 * line. Davis Cup Tennis (USA) masks all IRQs ($1402=0x07) and polls
+	 * the status register for the VRAM-VRAM-DMA-done (DV, bit 4) bit
+	 * after writing LENR. With the old "drain only when CPU.irq_lines
+	 * is clear" logic the bit got buried in pending_irqs forever and
+	 * the game hung on a black screen waiting for it. Now the bit lands
+	 * in status the moment the event happens; CPU.irq_lines is asserted
+	 * so a non-masked CPU also services the IRQ on its next step. */
 	if (type >= 0) {
-		PCE.VDC.pending_irqs <<= 4;
-		PCE.VDC.pending_irqs |= type & 0xF;
+		PCE.VDC.status |= 1 << type;
+		CPU.irq_lines |= INT_IRQ1;
 	}
 
-	/* Pop the first pending vdc interrupt only if CPU.irq_lines is clear */
-	int pos = 28;
-	while (!(CPU.irq_lines & INT_IRQ1) && PCE.VDC.pending_irqs) {
-		if (PCE.VDC.pending_irqs >> pos) {
-			PCE.VDC.status |= 1 << (PCE.VDC.pending_irqs >> pos);
-			PCE.VDC.pending_irqs &= ~(0xF << pos);
-			CPU.irq_lines |= INT_IRQ1; // Notify the CPU
-		}
-		pos -= 4;
-	}
-
-	// SuperGrafx: VDC2 shares the same IRQ1 line. Drain its independent stack
-	// the same way. CPU disambiguates VDC1/VDC2 sources by reading both status
-	// registers ($1FE000 and $1FE010).
+	/* SGX: VDC2 SATB/raster/sprite-collision paths push onto
+	 * PCE.VDC2.pending_irqs directly and call gfx_irq(-1) to merge.
+	 * Drain that stack unconditionally — same fix as VDC1 above. */
 	if (PCE.VPC.is_sgx) {
-		pos = 28;
-		while (!(CPU.irq_lines & INT_IRQ1) && PCE.VDC2.pending_irqs) {
+		int pos = 28;
+		while (PCE.VDC2.pending_irqs && pos >= 0) {
 			if (PCE.VDC2.pending_irqs >> pos) {
 				PCE.VDC2.status |= 1 << (PCE.VDC2.pending_irqs >> pos);
 				PCE.VDC2.pending_irqs &= ~(0xF << pos);
@@ -1203,7 +1229,14 @@ void __not_in_flash_func(gfx_run)(void)
 
 	/* Visible area */
 	if (scanline >= 14 && scanline <= 255) {
-		if (scanline == IO_VDC_MINLINE) {
+		// A game can program VPR so the display starts above the emulated
+		// window (Granzort title: VPR=0x0902 -> MINLINE=11 < 14). Rendering
+		// is clamped to scanline 14 by the guard above, so the sprite-list
+		// build must fire at the first line actually rendered — with the
+		// unclamped compare it never fires and the per-line sprite bitmasks
+		// freeze, blanking all sprites (or ghosting them at stale positions).
+		int min_render_line = IO_VDC_MINLINE < 14 ? 14 : IO_VDC_MINLINE;
+		if (scanline == min_render_line) {
 			gfx_latch_context(1);
 			build_sprite_lists(VDC1_CTX, sprite_bitmask_per_line);
 			if (PCE.VPC.is_sgx) {
@@ -1226,7 +1259,13 @@ void __not_in_flash_func(gfx_run)(void)
 			// mode. Sets gfx_context*.scroll_y based on the auto-incrementing
 			// bg_scroll_y_vdc1/2 (with pending-update handling), which is
 			// what real PCE/SGX hardware does and what Mesen2 emulates.
-			if (PCE.VPC.is_sgx) gfx_inc_scroll_y_sgx(line_counter);
+			// VDC2's BXR/CR must be re-latched per line too — otherwise
+			// mid-frame writes (per-line wind effects, dynamically enabled
+			// layers) are stale until the next frame.
+			if (PCE.VPC.is_sgx) {
+				gfx_latch_context_vdc2(1);
+				gfx_inc_scroll_y_sgx(line_counter);
+			}
 			osd_gfx_render_line = line_counter;
 			render_lines(line_counter, line_counter + 1);
 			line_counter++;

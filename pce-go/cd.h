@@ -12,6 +12,15 @@ extern "C" {
 #define CD_SECTOR_SIZE   2048
 #define CD_RAW_SECTOR_SIZE 2352
 #define CD_BIN_NAME_MAX  96    // per-track BIN filename (relative to CUE dir)
+// CD-DA prefetch ring depth. ~13.3 ms of audio per sector at 44.1 kHz, so
+// 32 sectors ≈ 425 ms — enough headroom to ride out long sd_mutex contention
+// bursts when core0 streams data-track sectors during cutscenes. Must be a
+// power of two (the ring index uses a bit-mask). 32 * 2352 = ~75 KB — lives
+// in PSRAM (allocated via frens_f_malloc in LoadDisc) so SRAM is not eaten.
+// Access pattern is small sequential memcpys (one sector write ~13 ms apart;
+// up to 2940 B read per emulator frame), well within PSRAM bandwidth.
+#define CD_AUDIO_RING_SECTORS 32
+#define CD_AUDIO_RING_MASK    (CD_AUDIO_RING_SECTORS - 1)
 
 // CUE sheet track descriptor. Tracks are stored sequentially as they appear
 // in the CUE. lba_start / lba_end are *disc-level* LBAs (concatenated across
@@ -147,11 +156,21 @@ typedef struct {
 	uint16_t audio_cur_sample;  // 0-587 within current sector
 	uint8_t  audio_end_mode;    // 0=stop, 1=loop, 2=IRQ, 3=stop+status
 
-	// Audio sector ring buffer (4 * CD_RAW_SECTOR_SIZE)
+	// CD-DA sample latch ($1805 write toggles L/R and latches the current
+	// sample; $1805/$1806 reads return it; $1803 bit 1 reports the channel).
+	// last_left/right_sample are kept current by cd_audio_generate_samples
+	// so the latch never has to touch the PSRAM ring from the emulation
+	// core (QMI contention with core1 streaming causes audio crackle).
+	bool     read_right_channel;
+	int16_t  audio_sample_latch;
+	int16_t  last_left_sample;
+	int16_t  last_right_sample;
+
+	// Audio sector ring buffer (CD_AUDIO_RING_SECTORS * CD_RAW_SECTOR_SIZE)
 	uint8_t  *audio_ring_buf;
 	uint8_t  audio_ring_write;
 	uint8_t  audio_ring_read;
-	uint8_t  audio_ring_count;  // filled slots (0-4)
+	uint8_t  audio_ring_count;  // filled slots (0..CD_AUDIO_RING_SECTORS)
 
 	// IRQ state
 	uint8_t  irq_mask;
@@ -196,6 +215,15 @@ void cd_close(void);
 // CD Audio (called from main loop each frame)
 void cd_audio_update(void);
 int  cd_audio_generate_samples(int16_t *out, int num_samples);
+
+// Diagnostics: cumulative CD-DA ring underrun count (see CD_AUDIO_DIAG)
+extern volatile uint32_t cd_audio_underruns;
+
+// Subchannel tick: raises the subcode IRQ (bit 0x10) at ~7.4 kHz whether or
+// not audio is playing, like real hardware delivering one subcode byte per
+// 1/7350 s. The System Card audio-CD player won't populate its track list
+// without it. Called from the pce.c scanline loop every other line.
+void cd_subcode_tick(void);
 
 // ADPCM playback: decode 4-bit ADPCM to PCM at the programmed rate,
 // resampled to the host rate and summed into out[]. Returns true if any

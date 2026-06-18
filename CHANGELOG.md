@@ -1,6 +1,6 @@
 # CHANGELOG
 
-Initial release of pico-pcePlus — a PC Engine / TurboGrafx-16 emulator for RP2350-based boards.
+SuperGrafx graphics fixes, smoother audio, and other improvements.
 
 
 # General Info
@@ -11,6 +11,31 @@ Initial release of pico-pcePlus — a PC Engine / TurboGrafx-16 emulator for RP2
 
 > [!IMPORTANT]
 > An **RP2350** board is required. The original RP2040 (Pico 1) is not supported.
+
+# v0.2
+
+## New
+
+- You can now play audio CDs with the CD player built into the System Card BIOS. Put a `.cue`/`.bin` or `.chd` image of a music CD on the SD card and start it like a CD game: the track list appears and playback, track skip, pause and the level meters all work.
+
+## Fixes
+
+- The emulator now runs at the PC Engine's native frame rate of 59.83 fps instead of 60 fps, and a frame-pacing bug that let demanding scenes run unthrottled (up to ~65 fps, speeding up music and gameplay) has been fixed. Audio stays in sync and is unaffected.
+- Fixed games that hung on a black screen when they polled the VDC status register with all IRQs masked (Davis Cup Tennis would black-screen the moment a match started; Battle Royale crashed after character select). The VDC status bits now update the moment each event happens instead of being queued behind the CPU's IRQ line.
+- Fixed graphical glitches in SuperGrafx games:
+	- Ghouls 'n Ghosts
+	- Aldynes
+	- Darius Plus
+	- Madou King Granzort
+- Fixed screen tearing when playing CHD-based CD games.
+- Reduced crackling audio in CD titles on certain configurations.
+- The FPS overlay now shows a per-second average instead of a fluctuating per-frame estimate.
+
+## For developers
+
+- Added a Linux host test harness (`hosttest/`) that runs the emulator core on a PC for faster debugging — no Pico or flashing needed. See `hosttest/README.md`.
+- The host test harness now accepts arbitrary controller input via the new `PCE_PRESS_KEYS=<frame>:<hexmask>[,…]` env var, in addition to the existing `PCE_PRESS_RUN` and `PCE_HOLD_FIRE`.
+
 
 # v0.1
 

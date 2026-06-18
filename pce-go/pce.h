@@ -9,7 +9,11 @@
 #define CLOCK_PSG              (CLOCK_MASTER / 6)
 
 // Timings (we don't support CSH/CSL yet...)
-#define CYCLES_PER_FRAME       (CLOCK_CPU / 60)
+// Note: PCE.Timer.cycles_per_line is set dynamically (113 or 455) by the CSH/CSL
+// instructions; these defines are documentation only and unused at runtime.
+// True PCE NTSC frame = 263 lines * 1365 master clocks at 21.47727 MHz / 3 CPU
+// divider = 119,665 cycles. 59.8261 Hz.
+#define CYCLES_PER_FRAME       (119665)
 #define CYCLES_PER_LINE        (CYCLES_PER_FRAME / 263 + 1)
 #define CYCLES_PER_TIMER_TICK  (1024) // 1097
 //#define CYCLES_PER_TIMER_TICK  (1097)
@@ -318,6 +322,7 @@ void pce_term(void);
 void pce_run(void);
 void pce_pause(void);
 void pce_writeIO(uint16_t A, uint8_t V);
+void pce_writeIO_st(uint8_t port, uint8_t V);
 uint8_t pce_readIO(uint16_t A);
 
 

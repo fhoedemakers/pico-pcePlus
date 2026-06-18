@@ -232,6 +232,10 @@ void __not_in_flash_func(pce_run)(void)
 		}
 		gfx_run();
 		osd_psg_scanline();
+		// Subcode IRQ cadence: every other scanline ≈ 7.9 kHz, near the
+		// 7350 Hz byte rate of the real subchannel stream.
+		if (PCE.Scanline & 1)
+			cd_subcode_tick();
 	}
 }
 
@@ -521,9 +525,10 @@ uint8_t __not_in_flash_func(pce_readIO)(uint16_t A)
 		if (PCE.VPC.is_sgx) {
 			uint8_t port = A & 0x1F;
 			if (port < 8) {
-				vdc_t *vdc = PCE.VPC.st_to_vdc2 ? &PCE.VDC2 : &PCE.VDC;
-				uint16_t *vram = PCE.VPC.st_to_vdc2 ? PCE.VRAM2 : PCE.VRAM;
-				ret = vdc_io_read(vdc, vram, port & 3);
+				// Memory-mapped $00-$07 ALWAYS accesses VDC1 — the VPC ST
+				// register only reroutes the CPU ST0/ST1/ST2 instructions
+				// (see pce_writeIO_st / Mesen2 PceVpc::Read).
+				ret = vdc_io_read(&PCE.VDC, PCE.VRAM, port & 3);
 			} else if (port >= 0x10 && port <= 0x17) {
 				ret = vdc_io_read(&PCE.VDC2, PCE.VRAM2, port & 3);
 			} else if (port == 0x08) {
@@ -655,13 +660,12 @@ void __not_in_flash_func(pce_writeIO)(uint16_t A, uint8_t V)
 	case 0x0000:                /* VDC / VPC (SuperGrafx) */
 		if (PCE.VPC.is_sgx) {
 			uint8_t port = A & 0x1F;
-			// $00-$07: VDC accessed via ST register routing (PCE port-mirror
-			// behaviour preserved across $04-$07, matching Mesen2 which
-			// likewise treats the high bits of the port nibble as don't-care).
+			// $00-$07: memory-mapped access ALWAYS targets VDC1 ($04-$07
+			// mirror $00-$03). The VPC ST register ($0E bit 0) only affects
+			// the CPU ST0/ST1/ST2 instructions, which enter through
+			// pce_writeIO_st below (Mesen2 PceVpc::Write vs StVdcWrite).
 			if (port < 8) {
-				vdc_t *vdc = PCE.VPC.st_to_vdc2 ? &PCE.VDC2 : &PCE.VDC;
-				uint16_t *vram = PCE.VPC.st_to_vdc2 ? PCE.VRAM2 : PCE.VRAM;
-				vdc_io_write(vdc, vram, port & 3, V, !PCE.VPC.st_to_vdc2);
+				vdc_io_write(&PCE.VDC, PCE.VRAM, port & 3, V, 1);
 			} else if (port >= 0x10 && port <= 0x17) {
 				// $10-$17: direct VDC2 access, with $14-$17 mirroring $10-$13.
 				vdc_io_write(&PCE.VDC2, PCE.VRAM2, port & 3, V, 0);
@@ -858,4 +862,20 @@ void __not_in_flash_func(pce_writeIO)(uint16_t A, uint8_t V)
 	}
 
 	MESSAGE_DEBUG("ignored I/O write: %04x,%02x at PC = %04X\n", A, V, CPU.PC);
+}
+
+
+/**
+  * ST0/ST1/ST2 immediate VDC write. These CPU instructions are the ONLY
+  * accesses affected by the SuperGrafx VPC ST register ($1FE00E bit 0):
+  * when set, they target VDC2. Memory-mapped writes to $1FE000-$1FE007
+  * always hit VDC1 regardless (Mesen2 PceVpc::StVdcWrite vs Write).
+  **/
+void __not_in_flash_func(pce_writeIO_st)(uint8_t port, uint8_t V)
+{
+	if (PCE.VPC.is_sgx && PCE.VPC.st_to_vdc2) {
+		vdc_io_write(&PCE.VDC2, PCE.VRAM2, port & 3, V, 0);
+	} else {
+		vdc_io_write(&PCE.VDC, PCE.VRAM, port & 3, V, 1);
+	}
 }

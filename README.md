@@ -19,8 +19,9 @@ This project is part of a family of Raspberry Pi Pico emulator projects:
 ## What it emulates
 
 - **HuCard ROMs** — Standard PC Engine / TurboGrafx-16 cartridge dumps (`.pce`) are loaded directly from the SD card.
-- **SuperGrafx (SGX)** — SuperGrafx titles are recognised and dispatched to the second VDC. SuperGrafx support requires PSRAM. SGX emulation is **still under development**: titles may contain graphical glitches. This title still has severe graphical glitches: **Madou King Granzort (Japan)**
+- **SuperGrafx (SGX)** — SuperGrafx titles are recognised and dispatched to the second VDC. SuperGrafx support requires PSRAM, and the board must be overclocked to 378 MHz to reach the correct framerate and audio. Overclocking to 378 MHz is only possible on configurations that use HSTX for video, such as the Adafruit Fruit Jam. PicoDVI configurations like the Waveshare RP2350 PiZero need an exact system clock of 252 MHz to produce 60 fps, which leaves no headroom to overclock for SuperGrafx, so they run SuperGrafx games at a reduced framerate and without audio.
 - **CD-ROM²** — CD-ROM² and Super CD-ROM² games are supported, including CD-DA audio playback and ADPCM streaming. CD-ROM² playback requires PSRAM and a System Card BIOS supplied by the user.
+- **Audio CDs** — Regular music CDs can be played with the CD player built into the System Card BIOS. Put a CUE/BIN or CHD image of a music CD on the SD card and start it like a CD game: the track list appears and playback, track skip, pause and the level meters all work.
 - **Save states** — Manual save and load slots are available through the in-game menu. An optional auto-save mode stores a state when the game exits and offers to resume it the next time the same ROM is launched. State files are stored on the SD card under `/savestates/PCE/<CRC32>/`.
 - **Backup RAM (BRAM)** — CD-ROM² games that use the System Card's BRAM (for in-game save data) have it persisted automatically alongside the save states.
 
@@ -35,7 +36,7 @@ Two disc-image formats are accepted:
 
 Each disc image (and its associated tracks for CUE/BIN) should be placed in its own folder on the SD card.
 
-> **Note on SD card speed :** cd playback most notably when playing CHD images is sensitive to SD card speed. Slow or aging cards can cause intermittent horizontal black-line flicker in the image during  play; the same disc on a faster card runs cleanly. If you see flicker, try a different/faster SD card before suspecting the emulator. 
+> **Note on SD card speed:** CD playback is sensitive to SD card speed, especially when using CHD images that must be decompressed in real time. Slow or aging cards can cause stutter and poor audio.
 
 ***
 
