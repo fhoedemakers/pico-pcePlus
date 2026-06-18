@@ -118,6 +118,14 @@ static const struct {
 	// DMA_CYC for surgical risk.
 	{0xBB0B3AEF, "Cadash (USA)", PCE_QUIRK_HW_VDC_DV_GATE | PCE_QUIRK_HW_VDC_DMA_CYC},
 	{0x8DC0D85F, "Cadash (JP)", PCE_QUIRK_HW_VDC_DV_GATE | PCE_QUIRK_HW_VDC_DMA_CYC},
+	// Davis Cup Tennis (USA) and Battle Royale (USA) disable display, mask
+	// all IRQs ($1402=0x07), and poll the VDC status register for the
+	// VRAM-VRAM-DMA-done (DV) bit. They need the status bit to land in
+	// $0000 the moment the event happens. Air Zonk and likely other titles
+	// regress if this is on universally (see project_air_zonk_regression),
+	// so STATUS_NOW is opt-in per CRC.
+	{0x9EDAB596, "Davis Cup Tennis (USA)", PCE_QUIRK_HW_VDC_STATUS_NOW},
+	{0xE70B01AF, "Battle Royale (USA)", PCE_QUIRK_HW_VDC_STATUS_NOW},
 	{0x00000000, "Unknown", 0},
 };
 

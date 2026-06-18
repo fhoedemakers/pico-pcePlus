@@ -1145,21 +1145,37 @@ gfx_term(void)
 	Raises a VDC IRQ and/or process pending VDC IRQs.
 	More than one interrupt can happen in a single line on real hardware and the cpu
 	would usually receive them one by one. We use an uint32 as a 8 slot buffer.
+
+	Two paths:
+	  - PCE_QUIRK_HW_VDC_STATUS_NOW: set the status bit and assert IRQ1 the
+	    moment the event happens. Needed by polling games (Davis Cup, Battle
+	    Royale) that mask IRQs and read $0000 to wait for DV.
+	  - Default: push the event onto pending_irqs and only drain into the
+	    status register when CPU.irq_lines is clear. Air Zonk relies on this
+	    serialisation (see project_air_zonk_regression).
 */
 void __not_in_flash_func(gfx_irq)(int type)
 {
-	/* Set the status bit immediately. On real PCE the status register
-	 * reflects whether each event has occurred, independent of the IRQ
-	 * line. Davis Cup Tennis (USA) masks all IRQs ($1402=0x07) and polls
-	 * the status register for the VRAM-VRAM-DMA-done (DV, bit 4) bit
-	 * after writing LENR. With the old "drain only when CPU.irq_lines
-	 * is clear" logic the bit got buried in pending_irqs forever and
-	 * the game hung on a black screen waiting for it. Now the bit lands
-	 * in status the moment the event happens; CPU.irq_lines is asserted
-	 * so a non-masked CPU also services the IRQ on its next step. */
-	if (type >= 0) {
-		PCE.VDC.status |= 1 << type;
-		CPU.irq_lines |= INT_IRQ1;
+	if (PCE.Quirks & PCE_QUIRK_HW_VDC_STATUS_NOW) {
+		if (type >= 0) {
+			PCE.VDC.status |= 1 << type;
+			CPU.irq_lines |= INT_IRQ1;
+		}
+	} else {
+		/* Legacy stack: push, then drain while IRQ1 is clear. */
+		if (type >= 0) {
+			PCE.VDC.pending_irqs <<= 4;
+			PCE.VDC.pending_irqs |= type & 0xF;
+		}
+		int pos = 28;
+		while (!(CPU.irq_lines & INT_IRQ1) && PCE.VDC.pending_irqs) {
+			if (PCE.VDC.pending_irqs >> pos) {
+				PCE.VDC.status |= 1 << (PCE.VDC.pending_irqs >> pos);
+				PCE.VDC.pending_irqs &= ~(0xF << pos);
+				CPU.irq_lines |= INT_IRQ1;
+			}
+			pos -= 4;
+		}
 	}
 
 	/* SGX: VDC2 SATB/raster/sprite-collision paths push onto

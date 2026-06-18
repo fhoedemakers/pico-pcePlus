@@ -328,6 +328,13 @@ extern uint8_t *PageW[8];
 #define PCE_QUIRK_HW_VDC_DV_GATE   0x1000  // gate DV IRQ on DCR.1 (Mesen2 VramVramIrqEnabled)
 #define PCE_QUIRK_HW_VDC_DMA_CYC   0x2000  // charge CPU cycles for VRAM-VRAM DMA (~8 per word)
 #define PCE_QUIRK_HW_VDC_INST_IRQ  0x4000  // dispatch pending IRQs immediately after CLI/PLP/RTI
+// Set the VDC1 status bit (DV/RR/CR/DS/VD) at the moment gfx_irq() is called,
+// independent of the IRQ line. Needed by games that mask IRQs and poll
+// $0000 (Davis Cup Tennis, Battle Royale). Off by default because Air Zonk
+// regressed when this became universal: changing the timing of when status
+// bits become visible to a polling loop breaks games whose IRQ handler
+// expects events to arrive serialised. See project_air_zonk_regression.
+#define PCE_QUIRK_HW_VDC_STATUS_NOW 0x8000
 #define PCE_QUIRK_HW_VDC           (PCE_QUIRK_HW_VDC_DV_GATE | PCE_QUIRK_HW_VDC_DMA_CYC | PCE_QUIRK_HW_VDC_INST_IRQ)
 
 /**
