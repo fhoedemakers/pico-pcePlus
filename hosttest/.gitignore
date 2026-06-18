@@ -1,5 +1,7 @@
 pce_host
 out/
+out*/
+vram*/
 solo1/
 solo2/
 fixed/
