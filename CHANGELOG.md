@@ -1,7 +1,6 @@
 # CHANGELOG
 
-SuperGrafx graphics fixes, smoother audio, and other improvements.
-
+SuperGrafx graphics fixes, smoother CHD playback, audio-CD player, and other improvements.
 
 # General Info
 
