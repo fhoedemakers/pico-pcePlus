@@ -111,8 +111,9 @@ const int8_t g_settings_visibility_pce[MOPT_COUNT] = {
     0,                               // Rapid Fire on B
     0,                               // Auto insert FDS disk (not applicable)
     0,                               // Auto swap FDS disk (not applicable)
-    1,                               // Enter bootsel mode
-    0                                // FDS disk swap (not applicable)
+    0,                               // FDS disk swap (not applicable)
+    HSTX,                            // Overclock toggle (HSTX builds only)
+    1                                // Enter bootsel mode (always last)
 };
 
 const uint8_t g_available_screen_modes_pce[] = {
