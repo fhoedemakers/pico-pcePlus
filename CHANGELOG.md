@@ -29,12 +29,15 @@ SuperGrafx graphics fixes, smoother CHD playback, audio-CD player, and other imp
 	- Madou King Granzort
 - Fixed screen tearing in CHD-based CD games.
 - Reduced audio crackle in CD games on some board configurations. See [#11](https://github.com/fhoedemakers/pico-pcePlus/issues/11).
+- Game speed now matches the real PC Engine refresh rate (59.826 Hz). Previously the emulator ran slightly too fast, which made some titles play noticeably quicker than on original hardware.
 - The FPS overlay now reports a one-second running average instead of a noisy per-frame value.
 
 ## For developers
 
 - Added a Linux host test harness (`hosttest/`) that runs the emulator core on a PC for faster debugging — no Pico or flashing needed. See `hosttest/README.md`.
 - The host test harness now accepts arbitrary controller input via the new `PCE_PRESS_KEYS=<frame>:<hexmask>[,…]` env var, in addition to the existing `PCE_PRESS_RUN` and `PCE_HOLD_FIRE`.
+- The host test harness can now load CD games (CUE/BIN and CHD), not just HuCard ROMs.
+- New `PCE_QUIRK` env var on the host test harness lets you force per-game compatibility quirks on or off when reproducing issues.
 
 
 # v0.1
