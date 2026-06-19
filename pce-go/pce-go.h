@@ -14,7 +14,25 @@
 #define crc32_le(a, b, c) rg_crc32(a, b, c)
 #else
 #define LOG_PRINTF(level, x...) printf(x)
-#define crc32_le(a, b, c) (0)
+// Standard CRC32-IEEE (poly 0xEDB88320, "le" variant) used by LoadCard to
+// look up per-game flags in romFlags[]. Without this fallback the macro
+// expanded to (0), so PCE.ROM_CRC was stuck at 0 and no romFlags entry
+// (Blazing Lazers TWO_PART_ROM, Populous ONBOARD_RAM, Cadash HW_VDC, ...)
+// has ever matched outside of a retro-go build. Bytewise so we don't pay
+// the 1 KB for a CRC table — one-time cost at ROM load. Matches zlib.crc32
+// and the (independent) implementation in cd.c::crc32_update.
+static inline uint32_t crc32_le(uint32_t crc, const uint8_t *data, size_t len)
+{
+	crc = ~crc;
+	for (size_t i = 0; i < len; i++) {
+		crc ^= data[i];
+		for (int b = 0; b < 8; b++) {
+			uint32_t mask = -(int32_t)(crc & 1);
+			crc = (crc >> 1) ^ (0xEDB88320u & mask);
+		}
+	}
+	return ~crc;
+}
 #endif
 
 #define MESSAGE_ERROR(x...) LOG_PRINTF(1, "!! " x)

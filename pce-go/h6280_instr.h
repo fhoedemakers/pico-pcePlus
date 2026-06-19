@@ -34,6 +34,24 @@ static const UBYTE bcd2bin[0x100] = {
 #define ALWAYS_INLINE inline __attribute__((__always_inline__))
 #define OPCODE_FUNC static ALWAYS_INLINE void
 
+// Forward declaration so CLI/PLP/RTI can dispatch pending IRQs immediately
+// when the HW_VDC quirk is active (matches Mesen2 per-instruction IRQ check
+// at PceCpu::Exec). Definition is later in this file.
+static ALWAYS_INLINE void interrupt(unsigned type);
+
+// When the HW_VDC_INST_IRQ quirk is set, an instruction that just cleared
+// the I flag (CLI / PLP / RTI) should dispatch a pending IRQ within a few
+// cycles instead of waiting up to a full scanline for the next h6280_run
+// boundary. Cadash's VBlank handler executes CLI and immediately expects
+// the queued RR IRQ to fire; the scanline-quantized delay drifts its
+// per-frame DMA pipeline and produces the bottom-of-screen dialog ghost.
+#define PCE_CHECK_PENDING_IRQ_AFTER_I_CLEAR() do {                          \
+	if (PCE.Quirks & PCE_QUIRK_HW_VDC_INST_IRQ) {                           \
+		unsigned _irq = CPU.irq_lines & ~CPU.irq_mask & INT_MASK;           \
+		if (!(CPU.P & FL_I) && _irq) interrupt(_irq);                       \
+	}                                                                       \
+} while (0)
+
 // Lucky for us FL_N is at the 7th bit position so we can save a comparison :)
 #define FLAG_NZ(val) ((val) == 0 ? FL_Z : ((val) & FL_N))
 
@@ -769,6 +787,7 @@ OPCODE_FUNC cli(void)
 	CPU.P &= ~(FL_T | FL_I);
 	CPU.PC++;
 	Cycles += 2;
+	PCE_CHECK_PENDING_IRQ_AFTER_I_CLEAR();
 }
 
 OPCODE_FUNC clv(void)
@@ -1694,6 +1713,7 @@ OPCODE_FUNC plp(void)
 	pull_8bit(CPU.P);
 	CPU.PC++;
 	Cycles += 4;
+	PCE_CHECK_PENDING_IRQ_AFTER_I_CLEAR();
 }
 
 OPCODE_FUNC plx(void)
@@ -1845,6 +1865,7 @@ OPCODE_FUNC rti(void)
 	pull_8bit(t2);
 	CPU.PC = (t | t2 << 8);
 	Cycles += 7;
+	PCE_CHECK_PENDING_IRQ_AFTER_I_CLEAR();
 }
 
 OPCODE_FUNC rts(void)

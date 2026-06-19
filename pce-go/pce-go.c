@@ -96,6 +96,8 @@ save_var_t SgxSaveStateVars[] =
 #define TWO_PART_ROM 0x0001
 #define ONBOARD_RAM  0x0100
 #define US_ENCODED   0x0010
+// Runtime quirk: see PCE_QUIRK_HW_VDC in pce.h.
+#define HW_VDC       PCE_QUIRK_HW_VDC
 
 static const struct {
 	const uint32_t CRC;
@@ -107,6 +109,23 @@ static const struct {
 	{0x55E9630D, "Legend of Hero Tonma", US_ENCODED},
 	{0x083C956A, "Populous", ONBOARD_RAM},
 	{0x0A9ADE99, "Populous", ONBOARD_RAM},
+	// Cadash (USA/JP) — DV_GATE prevents the spurious DV IRQ that ran the
+	// game's DV handler and stomped scroll state; DMA_CYC budgets enough
+	// CPU cycles for the DMA so the game's RR-handler timing settles.
+	// User-verified on Pico (2026-06-18): minimal pair fixes the dialog
+	// ghost. INST_IRQ (per-instruction CLI/PLP/RTI dispatch) also works
+	// in place of DMA_CYC but touches more of the CPU loop — prefer
+	// DMA_CYC for surgical risk.
+	{0xBB0B3AEF, "Cadash (USA)", PCE_QUIRK_HW_VDC_DV_GATE | PCE_QUIRK_HW_VDC_DMA_CYC},
+	{0x8DC0D85F, "Cadash (JP)", PCE_QUIRK_HW_VDC_DV_GATE | PCE_QUIRK_HW_VDC_DMA_CYC},
+	// Davis Cup Tennis (USA) and Battle Royale (USA) disable display, mask
+	// all IRQs ($1402=0x07), and poll the VDC status register for the
+	// VRAM-VRAM-DMA-done (DV) bit. They need the status bit to land in
+	// $0000 the moment the event happens. Air Zonk and likely other titles
+	// regress if this is on universally (see project_air_zonk_regression),
+	// so STATUS_NOW is opt-in per CRC.
+	{0x9EDAB596, "Davis Cup Tennis (USA)", PCE_QUIRK_HW_VDC_STATUS_NOW},
+	{0xE70B01AF, "Battle Royale (USA)", PCE_QUIRK_HW_VDC_STATUS_NOW},
 	{0x00000000, "Unknown", 0},
 };
 
@@ -146,12 +165,22 @@ LoadCard(uint8_t *data, size_t size)
 		offset, (int)PCE.ROM_SIZE, (int)ROM_MASK, (int)PCE.ROM_CRC);
 
 	while (romFlags[IDX].CRC) {
-		if (PCE.ROM_CRC == romFlags[IDX].CRC)
+		if (PCE.ROM_CRC == romFlags[IDX].CRC) {
+			MESSAGE_INFO("Matched known rom: %s (flags=%04X)\n",
+				romFlags[IDX].Name, romFlags[IDX].Flags);
 			break;
+		}
 		IDX++;
 	}
 
 	MESSAGE_INFO("Game Name: %s\n", romFlags[IDX].Name);
+
+	// Expose the matched flags to runtime code (gfx_irq gating, DMA cycle
+	// cost, per-instruction IRQ dispatch — see PCE_QUIRK_HW_VDC in pce.h).
+	// Load-time fixups (US_ENCODED, TWO_PART_ROM, ONBOARD_RAM) keep their
+	// existing inline behaviour below; PCE.Quirks just mirrors them for
+	// completeness and lets runtime code check the same bitmask.
+	PCE.Quirks = romFlags[IDX].Flags;
 
 	// US Encrypted
 	if ((romFlags[IDX].Flags & US_ENCODED) || PCE.ROM_DATA[0x1FFF] < 0xE0)

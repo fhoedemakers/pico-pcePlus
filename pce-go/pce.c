@@ -477,6 +477,7 @@ static inline void __not_in_flash_func(vdc_io_write)(vdc_t *vdc, uint16_t *vram,
 			{
 				int src_inc = (VR(DCR).W & 8) ? -1 : 1;
 				int dst_inc = (VR(DCR).W & 4) ? -1 : 1;
+				int dma_words = 0;
 				while (VR(LENR).W != 0xFFFF) {
 					if (VR(DISTR).W < 0x8000) {
 						vram[VR(DISTR).W] = vram[VR(SOUR).W];
@@ -484,15 +485,43 @@ static inline void __not_in_flash_func(vdc_io_write)(vdc_t *vdc, uint16_t *vram,
 					VR(SOUR).W  += src_inc;
 					VR(DISTR).W += dst_inc;
 					VR(LENR).W  -= 1;
+					dma_words++;
+				}
+				// HW_VDC_DMA_CYC quirk: charge CPU cycles for the transfer
+				// so the rest of the scanline's CPU budget is consumed by
+				// the DMA (matches Mesen2 ProcessVramDmaTransfer, ~2*clock_div
+				// per word; clock_div is typically 4 for 5.36 MHz mode,
+				// hence ~8 cycles/word). Without this the DMA is instant.
+				if (PCE.Quirks & PCE_QUIRK_HW_VDC_DMA_CYC) {
+					PCE.Cycles += dma_words * 8;
 				}
 			}
 			if (is_primary) {
-				gfx_irq(VDC_STAT_DV);
+				// HW_VDC_DV_GATE quirk: DV status bit is sticky regardless
+				// of IRQ enable, but the IRQ line is only asserted when DCR
+				// bit 1 (DMAIntON) is set. Matches Mesen2 PceVdc::ProcessVramDma
+				// gating on VramVramIrqEnabled.
+				if (PCE.Quirks & PCE_QUIRK_HW_VDC_DV_GATE) {
+					PCE.VDC.status |= 1 << VDC_STAT_DV;
+					if (DMAIntON)
+						gfx_irq(VDC_STAT_DV);
+				} else {
+					gfx_irq(VDC_STAT_DV);
+				}
 			} else {
 				// VDC2 DV IRQ — push to its own stack, then drain via gfx_irq.
-				PCE.VDC2.pending_irqs <<= 4;
-				PCE.VDC2.pending_irqs |= VDC_STAT_DV & 0xF;
-				gfx_irq(-1);
+				if (PCE.Quirks & PCE_QUIRK_HW_VDC_DV_GATE) {
+					PCE.VDC2.status |= 1 << VDC_STAT_DV;
+					if (PCE.VDC2.regs[DCR].W & 0x02) {
+						PCE.VDC2.pending_irqs <<= 4;
+						PCE.VDC2.pending_irqs |= VDC_STAT_DV & 0xF;
+						gfx_irq(-1);
+					}
+				} else {
+					PCE.VDC2.pending_irqs <<= 4;
+					PCE.VDC2.pending_irqs |= VDC_STAT_DV & 0xF;
+					gfx_irq(-1);
+				}
 			}
 			return;
 
