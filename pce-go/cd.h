@@ -219,6 +219,16 @@ int  cd_audio_generate_samples(int16_t *out, int num_samples);
 // Diagnostics: cumulative CD-DA ring underrun count (see CD_AUDIO_DIAG)
 extern volatile uint32_t cd_audio_underruns;
 
+// Diagnostics: fetch+clear the per-frame data-sector read tally. Returns
+// non-zero values only when CD_DEBUG_READ was set at compile time. out_first_lba
+// is the LBA of the first read serviced in the current frame (else 0).
+void cd_get_and_clear_reads_this_frame(uint32_t *out_count, uint32_t *out_first_lba);
+
+// Diagnostics: fetch+clear top-N hottest CD-port read addresses in the current
+// frame. Writes the $18xx low-byte into out_addr[i] and the count into
+// out_count[i], descending; unused slots get 0/0. No-op when CD_DEBUG_IO is off.
+void cd_get_and_clear_io_hotspots(uint8_t *out_addr, uint32_t *out_count, int n);
+
 // Subchannel tick: raises the subcode IRQ (bit 0x10) at ~7.4 kHz whether or
 // not audio is playing, like real hardware delivering one subcode byte per
 // 1/7350 s. The System Card audio-CD player won't populate its track list

@@ -871,6 +871,49 @@ void __not_in_flash_func(process)(void)
         bool behind = frameWorkUs > PCE_FRAME_SKIP_OVERRUN_US;
         skipRender = behind && !skipRender;
 #endif
+
+        // A/B experiment switch: build with -DPCE_DISABLE_FRAMESKIP=1 to never
+        // skip rendering. Use it to decide whether the Sapphire "freeze" during
+        // intensive action is the frameskip itself (freeze disappears, possibly
+        // replaced by audio crackle / sub-60fps slowdown) or something downstream
+        // in the display path (freeze persists). See project_sapphire_freeze_phase_a.
+#if PCE_DISABLE_FRAMESKIP
+        skipRender = false;
+#endif
+
+        // 1 Hz UART diagnostic of frameskip behaviour. Build with
+        // -DPCE_FRAMESKIP_DIAG=1. Reports per second: total frames, how many
+        // were render-skipped, the worst single-frame emulation+render time,
+        // and (CD on PicoDVI) the minimum CD-DA ring fill permille — i.e. the
+        // exact signals that trigger a skip. Capture this while reproducing the
+        // Sapphire freeze to see if skips spike with the visible stall.
+#if PCE_FRAMESKIP_DIAG
+        {
+            static uint32_t fs_frames = 0, fs_skips = 0, fs_maxwork = 0, fs_t0 = 0;
+            static uint32_t fs_minfill = 1000;
+            fs_frames++;
+            if (skipRender) fs_skips++;
+            if (frameWorkUs > fs_maxwork) fs_maxwork = frameWorkUs;
+#if !HSTX
+            if (CD.cd_attached && cdFb)
+            {
+                uint32_t fill = cdAudioFillPermille();
+                if (fill < fs_minfill) fs_minfill = fill;
+            }
+#endif
+            uint32_t fs_now = time_us_32();
+            if (fs_t0 == 0) fs_t0 = fs_now;
+            if (fs_now - fs_t0 >= 1000000u)
+            {
+                printf("[fsdiag] frames=%lu skips=%lu maxwork_us=%lu minfill=%lu\n",
+                       (unsigned long)fs_frames, (unsigned long)fs_skips,
+                       (unsigned long)fs_maxwork, (unsigned long)fs_minfill);
+                fs_frames = fs_skips = fs_maxwork = 0;
+                fs_minfill = 1000;
+                fs_t0 = fs_now;
+            }
+        }
+#endif
 #endif
     }
     gfx_set_skip_render(false);
