@@ -113,7 +113,8 @@ const int8_t g_settings_visibility_pce[MOPT_COUNT] = {
     0,                               // Auto swap FDS disk (not applicable)
     0,                               // FDS disk swap (not applicable)
     HSTX,                            // Overclock toggle (HSTX builds only)
-    1                                // Enter bootsel mode (always last)
+    1,                               // Enter bootsel mode
+    BOOTLOADER_BUILD,                // Return to emuLoader picker (only when built for the loader)
 };
 
 const uint8_t g_available_screen_modes_pce[] = {
