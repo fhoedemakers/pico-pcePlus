@@ -90,31 +90,32 @@ static int current_y_offset = 0;
 
 // Settings visibility for PCE
 const int8_t g_settings_visibility_pce[MOPT_COUNT] = {
-    0,                               // Exit Game
+    0,                               // Exit Game, or back to menu. Always visible when in-game.
     0,                               // Reset Game
+    BOOTLOADER_BUILD,                // Return to emuLoader picker (only when built for the loader)
     0,                               // Save / Restore State
-    1,                               // Screen Mode (1:1 / 8:7 x scanlines on/off)
+    1,                               // Screen Mode
     0,                               // Scanlines toggle (superseded by Screen Mode)
-    HSTX,                            // Scanline type (HSTX only)
+    HSTX,                            // Scanline Type (HSTX only)
     1,                               // FPS Overlay
     0,                               // Audio Enable
     0,                               // Frame Skip
-    (HSTX && ENABLEDVI),             // Display Mode HDMI or DVI
-    (EXT_AUDIO_IS_ENABLED),          // External Audio
+    HSTX && ENABLEDVI,                            // Display Mode (HDMI or DVI, only when HSTX is enabled, because non-HSTX builds always use HDMI)
+    (EXT_AUDIO_IS_ENABLED ), // External Audio
     1,                               // Font Color
     1,                               // Font Back Color
     ENABLE_VU_METER,                 // VU Meter
+    //(HW_CONFIG == 8),                // Fruit Jam Internal Speaker
     (HW_CONFIG == 8),                // Fruit Jam Volume Control
-    0,                               // DMG Palette (not applicable)
-    0,                               // Border Mode (not applicable)
+    0,                               // DMG Palette (NES emulator does not use GameBoy palettes)
+    0,                               // Border Mode (Super Gameboy style borders not applicable for NES)
     0,                               // Rapid Fire on A
     0,                               // Rapid Fire on B
-    0,                               // Auto insert FDS disk (not applicable)
-    0,                               // Auto swap FDS disk (not applicable)
-    0,                               // FDS disk swap (not applicable)
-    HSTX,                            // Overclock toggle (HSTX builds only)
+    0,                               // Auto Insert Disk A, enabled at runtime on RP2350
+    0,                               // Auto Swap FDS, enabled at runtime on RP2350
+    0,                               // FDS Disk Swap (toggled on after fdsParse succeeds)
+    0,                               // Overclock (CPU high clock toggle)
     1,                               // Enter bootsel mode
-    BOOTLOADER_BUILD,                // Return to emuLoader picker (only when built for the loader)
 };
 
 const uint8_t g_available_screen_modes_pce[] = {
