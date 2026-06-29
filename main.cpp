@@ -100,8 +100,8 @@ const int8_t g_settings_visibility_pce[MOPT_COUNT] = {
     1,                               // FPS Overlay
     0,                               // Audio Enable
     0,                               // Frame Skip
-    HSTX && ENABLEDVI,                            // Display Mode (HDMI or DVI, only when HSTX is enabled, because non-HSTX builds always use HDMI)
-    (EXT_AUDIO_IS_ENABLED ), // External Audio
+    HSTX && ENABLEDVI,               // Display Mode (HDMI or DVI, only when HSTX is enabled, because non-HSTX builds always use HDMI)
+    (EXT_AUDIO_IS_ENABLED ),         // External Audio
     1,                               // Font Color
     1,                               // Font Back Color
     ENABLE_VU_METER,                 // VU Meter
@@ -114,7 +114,8 @@ const int8_t g_settings_visibility_pce[MOPT_COUNT] = {
     0,                               // Auto Insert Disk A, enabled at runtime on RP2350
     0,                               // Auto Swap FDS, enabled at runtime on RP2350
     0,                               // FDS Disk Swap (toggled on after fdsParse succeeds)
-    0,                               // Overclock (CPU high clock toggle)
+    HSTX,                               // Overclock (CPU high clock toggle)
+    0,                               // YM Audio, SMS only
     1,                               // Enter bootsel mode
 };
 
