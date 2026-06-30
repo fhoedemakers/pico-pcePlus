@@ -38,6 +38,14 @@ Each disc image (and its associated tracks for CUE/BIN) should be placed in its 
 
 > **Note on SD card speed:** CD playback is sensitive to SD card speed, especially when using CHD images that must be decompressed in real time. v0.2 reduced the impact considerably, but a slow or aging card can still cause occasional stutter or audio glitches; a faster card resolves it.
 
+### Setup Overview
+
+1. Prepare an SD card formatted as FAT32 or exFAT
+2. Transfer ROM files to the card, preferably in /roms/PCE and CD games in /roms/PCE/CD (subdirectory organization is supported).
+3. Optionally include [metadata files](#using-metadata) for game information
+4. Insert the SD card into the device
+5. Use the menu to browse, select, and play games. Save data is automatically persisted to the SD card.
+
 ***
 
 ## Hardware requirements
