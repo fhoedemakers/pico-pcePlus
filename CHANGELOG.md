@@ -1,6 +1,6 @@
 # CHANGELOG
 
-SuperGrafx graphics fixes, smoother CHD playback, audio-CD player, and other improvements.
+Overclock setting and minor other fixes.
 
 # General Info
 
@@ -10,6 +10,18 @@ SuperGrafx graphics fixes, smoother CHD playback, audio-CD player, and other imp
 
 > [!IMPORTANT]
 > An **RP2350** board is required. The original RP2040 (Pico 1) is not supported.
+
+# Unreleased
+
+## New
+
+- **Overclock on/off toggle** in the settings menu (HSTX boards only). The menu will reboot after the change is saved. Some HuCard games run better with a higher overclock.
+- The in-game settings menu now scrolls when there are more entries than fit on screen.
+
+## Fixes
+
+- Small splash-screen fix.
+
 
 # v0.2
 
