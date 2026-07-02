@@ -26,17 +26,11 @@ This project is part of a family of Raspberry Pi Pico emulator projects:
 - **Save states** — Manual save and load slots are available through the in-game menu. An optional auto-save mode stores a state when the game exits and offers to resume it the next time the same ROM is launched. State files are stored on the SD card under `/savestates/PCE/<CRC32>/`.
 - **Backup RAM (BRAM)** — CD-ROM² games that use the System Card's BRAM (for in-game save data) have it persisted automatically alongside the save states.
 
-<img width="1920" height="1080" alt="Screenshot 2026-07-02 18-17-33" src="https://github.com/user-attachments/assets/3aaf8609-8a22-4ae2-a30c-a1245db6fa3a" />
-
-<img width="1920" height="1080" alt="Screenshot 2026-07-02 18-17-44" src="https://github.com/user-attachments/assets/bbe11c91-2d1c-44f4-a0e9-f58433475f68" />
-
-<img width="1920" height="1080" alt="Screenshot 2026-07-02 18-18-06" src="https://github.com/user-attachments/assets/2f5dfe78-1ea8-436e-95e6-ad5b10b90735" />
-
-<img width="1920" height="1080" alt="Screenshot 2026-07-02 18-19-17" src="https://github.com/user-attachments/assets/96554ffc-37d1-4015-b2ee-121e8e68d36f" />
-
-<img width="1920" height="1080" alt="Screenshot 2026-07-02 18-22-44" src="https://github.com/user-attachments/assets/e6fcf7a5-3775-474e-b86a-a0625ae8d9a3" />
-
-<img width="1920" height="1080" alt="Screenshot 2026-07-02 18-32-00" src="https://github.com/user-attachments/assets/240948c6-d0eb-48b1-a7b8-efcc7d5ab4f7" />
+| | |
+|---|---|
+| <img width="1920" height="1080" alt="Screenshot 2026-07-02 18-17-33" src="https://github.com/user-attachments/assets/3aaf8609-8a22-4ae2-a30c-a1245db6fa3a" /> | <img width="1920" height="1080" alt="Screenshot 2026-07-02 18-17-44" src="https://github.com/user-attachments/assets/bbe11c91-2d1c-44f4-a0e9-f58433475f68" /> |
+| <img width="1920" height="1080" alt="Screenshot 2026-07-02 18-18-06" src="https://github.com/user-attachments/assets/2f5dfe78-1ea8-436e-95e6-ad5b10b90735" /> | <img width="1920" height="1080" alt="Screenshot 2026-07-02 18-19-17" src="https://github.com/user-attachments/assets/96554ffc-37d1-4015-b2ee-121e8e68d36f" /> |
+| <img width="1920" height="1080" alt="Screenshot 2026-07-02 18-22-44" src="https://github.com/user-attachments/assets/e6fcf7a5-3775-474e-b86a-a0625ae8d9a3" /> | <img width="1920" height="1080" alt="Screenshot 2026-07-02 18-32-00" src="https://github.com/user-attachments/assets/240948c6-d0eb-48b1-a7b8-efcc7d5ab4f7" /> |
 
 
 
