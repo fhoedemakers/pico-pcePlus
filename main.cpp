@@ -117,6 +117,7 @@ const int8_t g_settings_visibility_pce[MOPT_COUNT] = {
     HSTX,                               // Overclock (CPU high clock toggle)
     0,                               // YM Audio, SMS only
     1,                               // Enter bootsel mode
+    1,                               // Controller Test
 };
 
 const uint8_t g_available_screen_modes_pce[] = {
