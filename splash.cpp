@@ -23,7 +23,7 @@ void splash()
     strcpy(s, "emulator for RP2040/RP2350");
     putText(SCREEN_COLS / 2 - strlen(s) / 2, 5, s, fgcolorSplash, bgcolorSplash);
 
-    strcpy(s, "PCE-GO by ducalex (retro-go)");
+    strcpy(s, "Based on PCE-GO and Mesen");
     putText(SCREEN_COLS / 2 - strlen(s) / 2, 7, s, fgcolorSplash, bgcolorSplash);
 
     strcpy(s, "Pico Port");

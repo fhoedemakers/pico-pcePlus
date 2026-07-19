@@ -4,6 +4,7 @@
 
 **pico-pcePlus** is a PC Engine / TurboGrafx-16 emulator for RP2350-based microcontrollers. It is built on the [pce-go](https://github.com/ducalex/retro-go) emulation core from retro-go by ducalex, integrated with the video, audio, menu, and SD card framework from [pico-infonesPlus](https://github.com/fhoedemakers/pico-infonesPlus).
 
+
 > [!IMPORTANT]
 > An **RP2350** board is required. The original RP2040 (Pico 1) is not supported.
 
@@ -25,6 +26,14 @@ This project is part of a family of Raspberry Pi Pico emulator projects:
 - **Save states** — Manual save and load slots are available through the in-game menu. An optional auto-save mode stores a state when the game exits and offers to resume it the next time the same ROM is launched. State files are stored on the SD card under `/savestates/PCE/<CRC32>/`.
 - **Backup RAM (BRAM)** — CD-ROM² games that use the System Card's BRAM (for in-game save data) have it persisted automatically alongside the save states.
 
+| | |
+|---|---|
+| <img width="1920" height="1080" alt="Screenshot 2026-07-02 18-17-33" src="https://github.com/user-attachments/assets/3aaf8609-8a22-4ae2-a30c-a1245db6fa3a" /> | <img width="1920" height="1080" alt="Screenshot 2026-07-02 18-17-44" src="https://github.com/user-attachments/assets/bbe11c91-2d1c-44f4-a0e9-f58433475f68" /> |
+| <img width="1920" height="1080" alt="Screenshot 2026-07-02 18-18-06" src="https://github.com/user-attachments/assets/2f5dfe78-1ea8-436e-95e6-ad5b10b90735" /> | <img width="1920" height="1080" alt="Screenshot 2026-07-02 18-19-17" src="https://github.com/user-attachments/assets/96554ffc-37d1-4015-b2ee-121e8e68d36f" /> |
+| <img width="1920" height="1080" alt="Screenshot 2026-07-02 18-22-44" src="https://github.com/user-attachments/assets/e6fcf7a5-3775-474e-b86a-a0625ae8d9a3" /> | <img width="1920" height="1080" alt="Screenshot 2026-07-02 18-32-00" src="https://github.com/user-attachments/assets/240948c6-d0eb-48b1-a7b8-efcc7d5ab4f7" /> |
+
+
+
 ***
 
 ## CD-ROM² disc formats
@@ -37,6 +46,14 @@ Two disc-image formats are accepted:
 Each disc image (and its associated tracks for CUE/BIN) should be placed in its own folder on the SD card.
 
 > **Note on SD card speed:** CD playback is sensitive to SD card speed, especially when using CHD images that must be decompressed in real time. v0.2 reduced the impact considerably, but a slow or aging card can still cause occasional stutter or audio glitches; a faster card resolves it.
+
+### Setup Overview
+
+1. Prepare an SD card formatted as FAT32 or exFAT
+2. Transfer ROM files to the card, preferably in /roms/PCE and CD games in /roms/PCE/CD (subdirectory organization is supported).
+3. Optionally include [metadata files](#using-metadata) for game information
+4. Insert the SD card into the device
+5. Use the menu to browse, select, and play games. Save data is automatically persisted to the SD card.
 
 ***
 
@@ -78,6 +95,7 @@ A metadata pack can be downloaded from the [releases page](https://github.com/fh
 ├── images/   (box art, named by ROM CRC32)
 └── descr/    (text descriptions, named by ROM CRC32)
 ```
+<img width="1920" height="1080" alt="Screenshot 2026-07-02 18-25-51" src="https://github.com/user-attachments/assets/685485d8-d882-4ec9-aaff-76de7e95920a" />
 
 ***
 

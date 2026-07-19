@@ -91,6 +91,20 @@ static uint8_t *framebuffer_top, *framebuffer_bottom;
 static uint64_t sprite_bitmask_per_line[XBUF_HEIGHT];
 static uint64_t sprite_bitmask_per_line_vdc2[XBUF_HEIGHT];
 
+// Render-load proxy: total sprite scanline-rows rasterized per frame (summed
+// across the per-scanline draw_sprite calls). A good stand-in for the Pico
+// frameskip's frameWorkUs trigger — heavy "intensive action" frames push this
+// way up. Read+cleared per frame by the host harness; inert when GFX_DEBUG_LOAD
+// is off so the Pico build pays nothing.
+#ifndef GFX_DEBUG_LOAD
+#define GFX_DEBUG_LOAD 0
+#endif
+#if GFX_DEBUG_LOAD
+uint32_t gfx_sprite_rows_this_frame = 0;
+uint32_t gfx_sphit_en_this_frame = 0;    // sprite-0 collision IRQ enabled this frame
+uint32_t gfx_sphit_true_this_frame = 0;  // bounding-box collision detected this frame
+#endif
+
 static void __not_in_flash_func(build_sprite_lists)(const vdc_ctx_t *ctx, uint64_t *bitmask)
 {
 	memset(bitmask, 0, sizeof(uint64_t) * XBUF_HEIGHT);
@@ -204,6 +218,9 @@ static void __not_in_flash_func(draw_tiles)(const vdc_ctx_t *ctx, uint8_t *scree
 */
 static void __not_in_flash_func(draw_sprite)(uint8_t *P, const uint16_t *C, int height, uint32_t attr)
 {
+#if GFX_DEBUG_LOAD
+	gfx_sprite_rows_this_frame += (height > 0) ? height : 0;
+#endif
 	uint8_t *PAL = &PCE.Palette[256 + ((attr & 0xF) << 4)];
 
 	bool hflip = attr & H_FLIP;
@@ -1303,6 +1320,13 @@ void __not_in_flash_func(gfx_run)(void)
 #endif
 
 		// Trigger interrupts
+#if GFX_DEBUG_LOAD
+		extern uint32_t gfx_sphit_en_this_frame, gfx_sphit_true_this_frame;
+		if (SpHitON) {
+			gfx_sphit_en_this_frame = 1;
+			if (sprite_hit_check(VDC1_CTX)) gfx_sphit_true_this_frame = 1;
+		}
+#endif
 		if (SpHitON && sprite_hit_check(VDC1_CTX)) {
 			gfx_irq(VDC_STAT_CR);
 		}

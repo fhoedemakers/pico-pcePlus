@@ -15,6 +15,10 @@ CHDR=external/libchdr
 CFLAGS=(
   -O1 -g -fsanitize=address
   -DPCE_HOST_DEBUG -DENABLE_CHD=1 -DPICO_RP2350=1
+  # Diagnostics (gated off by default; flip to =1 to re-enable):
+  #   -DGFX_DEBUG_LOAD=1  per-frame sprite-row + sprite-0 collision proxy (PCE_TRACE_LOAD)
+  #   -DCD_DEBUG_READ=1  per-frame data-sector read tally (PCE_TRACE_CD)
+  #   -DCD_DEBUG_IO=1     per-frame $18xx read histogram (freeze io: dump)
   -DWANT_RAW_DATA_SECTOR=1 -DWANT_SUBCODE=0 -DVERIFY_BLOCK_CRC=0
   -DMINIZ_NO_STDIO=1 -DMINIZ_NO_TIME=1
   -DMINIZ_NO_ARCHIVE_APIS=1 -DMINIZ_NO_ARCHIVE_WRITING_APIS=1

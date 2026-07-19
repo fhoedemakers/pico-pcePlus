@@ -32,6 +32,36 @@ void osd_vsync(void) {}
 void osd_psg_scanline(void) {}
 void osd_psg_sync(int frame_cycle) { (void)frame_cycle; }
 
+// FNV-1a 32-bit over the active framebuffer region. Used by PCE_FREEZE_DETECT
+// to flag consecutive identical frames — i.e. emulator-side freezes. We hash
+// width × XBUF_HEIGHT (not just the active height) so a mode change still
+// triggers a hash mismatch and resets the run.
+static uint32_t fb_hash(int w)
+{
+	uint32_t h = 2166136261u;
+	const uint8_t *src = fb + 16;
+	for (int y = 0; y < XBUF_HEIGHT; y++) {
+		const uint8_t *row = src + y * XBUF_WIDTH;
+		for (int x = 0; x < w; x++) {
+			h ^= row[x];
+			h *= 16777619u;
+		}
+	}
+	// Fold in the VCE color registers: the framebuffer stores palette
+	// *indices*, so a fade/flash effect (game cycling $0402/$0403 colors)
+	// leaves the indices identical while the visible colors change. Without
+	// this a fade reads as a frozen frame (false positive). A genuine freeze
+	// holds both indices AND colors static.
+	for (int i = 0; i < 0x200; i++) {
+		uint16_t c = PCE.VCE.regs[i].W;
+		h ^= (uint8_t)(c & 0xFF);
+		h *= 16777619u;
+		h ^= (uint8_t)(c >> 8);
+		h *= 16777619u;
+	}
+	return h;
+}
+
 static void dump_ppm(const char *dir, int frame)
 {
 	char path[512];
@@ -77,6 +107,14 @@ int main(int argc, char **argv)
 		press_run = atoi(getenv("PCE_PRESS_RUN"));
 	if (getenv("PCE_SOLO_VDC"))
 		pce_dbg_solo_vdc = atoi(getenv("PCE_SOLO_VDC"));
+
+	// PCE_FREEZE_DETECT=N — flag any run of >=N consecutive identical hashed
+	// framebuffers as a freeze. Prints once at threshold crossing and once on
+	// recovery. 0 (default) disables. PCE_TRACE_CD=1 prints per-frame
+	// data-sector read count + first LBA via cd.c's CD_DEBUG_READ counters.
+	int freeze_detect = getenv("PCE_FREEZE_DETECT")
+		? atoi(getenv("PCE_FREEZE_DETECT")) : 0;
+	int trace_cd = getenv("PCE_TRACE_CD") ? atoi(getenv("PCE_TRACE_CD")) : 0;
 
 	// PCE_PRESS_KEYS=<frame>:<hex>[,<frame>:<hex>...] — hold the given JOY_* mask
 	// for 10 frames at each frame, in addition to PCE_PRESS_RUN/PCE_HOLD_FIRE.
@@ -167,6 +205,90 @@ int main(int argc, char **argv)
 			cd_audio_generate_samples(cd_buf, 735);
 			cd_adpcm_generate_samples(cd_buf, 735, 44100);
 		}
+
+		if (trace_cd) {
+			uint32_t reads = 0, first_lba = 0;
+			cd_get_and_clear_reads_this_frame(&reads, &first_lba);
+			if (reads)
+				printf("[cd-trace] frame=%05d reads=%u first_lba=%u\n",
+					frame, reads, first_lba);
+		}
+
+#if GFX_DEBUG_LOAD
+		// Render-load proxy: sprite scanline-rows rasterized this frame. High
+		// values are the "intensive action" frames that trip the Pico's
+		// frameskip (frameWorkUs overrun) and stall the picture on hardware.
+		extern uint32_t gfx_sprite_rows_this_frame;
+		extern uint32_t gfx_sphit_en_this_frame, gfx_sphit_true_this_frame;
+		if (getenv("PCE_TRACE_LOAD")) {
+			printf("[load] frame=%05d sprite_rows=%u sphit_en=%u sphit_hit=%u\n",
+				frame, gfx_sprite_rows_this_frame,
+				gfx_sphit_en_this_frame, gfx_sphit_true_this_frame);
+		}
+		gfx_sprite_rows_this_frame = 0;
+		gfx_sphit_en_this_frame = 0;
+		gfx_sphit_true_this_frame = 0;
+#endif
+
+		// Per-frame: clear+capture CD-port read histogram so we can attribute
+		// it to the freeze trigger when one fires. Zero overhead when
+		// CD_DEBUG_IO is off (the underlying counters are inert).
+		uint8_t  hot_addr[3]  = {0,0,0};
+		uint32_t hot_count[3] = {0,0,0};
+		if (CD.cd_attached)
+			cd_get_and_clear_io_hotspots(hot_addr, hot_count, 3);
+
+		if (freeze_detect > 0) {
+			static uint32_t prev_hash = 0;
+			static int dupe_run = 0;
+			static int reported = 0;
+			int hw = PCE.VDC.screen_width > 0 ? PCE.VDC.screen_width : 256;
+			if (hw > XBUF_WIDTH) hw = XBUF_WIDTH;
+			uint32_t h = fb_hash(hw);
+			if (frame > 0 && h == prev_hash) {
+				dupe_run++;
+				if (dupe_run == freeze_detect) {
+					// Dump 16 bytes starting at PC-2 so we see the LDA opcode
+					// of the poll loop (PC sample is typically at the BNE).
+					uint16_t base = (CPU.PC >= 2) ? (CPU.PC - 2) : 0;
+					char dump[64]; dump[0] = 0;
+					int off = 0;
+					for (int i = 0; i < 16 && off < (int)sizeof(dump) - 4; i++) {
+						uint8_t *pg = PageR[(base + i) >> 13];
+						uint8_t b = (pg && pg != PCE.IOAREA)
+							? pg[(uint16_t)(base + i)] : 0xFF;
+						off += snprintf(dump + off, sizeof(dump) - off,
+							"%02X ", b);
+					}
+					printf("[freeze] frame=%05d dupe_run=%d "
+						"pc=$%04X halted=%u "
+						"adpcm: play=%u len=$%04X mask=$%02X ai=$%02X "
+						"audio_st=%u "
+						"io: $%02X=%u $%02X=%u $%02X=%u  "
+						"@%04X: %s\n",
+						frame, dupe_run,
+						CPU.PC, (unsigned)CPU.halted,
+						(unsigned)CD.adpcm_playing,
+						(unsigned)CD.adpcm_length,
+						(unsigned)CD.irq_mask,
+						(unsigned)(CD.irq_status),
+						(unsigned)CD.audio_status,
+						hot_addr[0], hot_count[0],
+						hot_addr[1], hot_count[1],
+						hot_addr[2], hot_count[2],
+						base, dump);
+					reported = 1;
+				}
+			} else {
+				if (reported)
+					printf("[freeze-end] frame=%05d dupe_run=%d\n",
+						frame, dupe_run);
+				dupe_run = 0;
+				reported = 0;
+			}
+			prev_hash = h;
+		}
+
 		if (dump_every > 0 && frame % dump_every == 0)
 			dump_ppm(outdir, frame);
 		if (getenv("PCE_DUMP_REGS") && frame % 100 == 0) {

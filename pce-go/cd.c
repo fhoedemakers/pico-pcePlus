@@ -45,6 +45,32 @@ cd_state_t CD;
 #define CD_DEBUG_SCSI 0
 #endif
 
+// Per-frame counter of data-sector reads (the synchronous f_read / CHD-decompress
+// path in read_sector). Used to tell whether a freeze is co-incident with a
+// sector-read burst. Counter increments every read; getter clears at frame end.
+// Plumbed into hosttest via host_main.c; on Pico can be wired into [adiag].
+#ifndef CD_DEBUG_READ
+#define CD_DEBUG_READ 0
+#endif
+
+#if CD_DEBUG_READ
+static uint32_t cd_reads_this_frame_count = 0;
+static uint32_t cd_reads_first_lba_this_frame = 0;
+static bool     cd_reads_first_lba_valid = false;
+#endif
+
+// Per-frame I/O-read histogram over CD ports ($18xx, indexed by addr & 0xFF).
+// Sapphire-style poll-wait diagnosis: when the game freezes on a register
+// read, the freeze-entry hotspot dominates this histogram. host_main.c prints
+// the top 3 entries when the freeze detector trips.
+#ifndef CD_DEBUG_IO
+#define CD_DEBUG_IO 0
+#endif
+
+#if CD_DEBUG_IO
+static uint32_t cd_io_reads[256];
+#endif
+
 #if CD_DEBUG_SCSI
 static bool scsi_first_cmd_dumped = false;
 static bool scsi_log_this = true; // set per-command; false for skipped SUBQs
@@ -835,6 +861,14 @@ static int read_sector(uint32_t lba)
 	if (idx < 0) return -1;
 	cd_track_t *t = &CD.tracks[idx];
 
+#if CD_DEBUG_READ
+	if (!cd_reads_first_lba_valid) {
+		cd_reads_first_lba_this_frame = lba;
+		cd_reads_first_lba_valid = true;
+	}
+	cd_reads_this_frame_count++;
+#endif
+
 	// CHD-backed disc: pull a raw 2352-byte sector through the hunk cache
 	// (libchdr decompression) and skip the 16-byte sync header to give the
 	// SCSI layer the same 2048-byte MODE1 payload it gets for CUE+BIN.
@@ -1310,6 +1344,17 @@ static void adpcm_set_half_reached(bool val)
 	// Stubbed: without ADPCM playback the length counter never counts
 	// down, so the half-reached flag would stay set forever after a
 	// length latch — blocking BIOS code that polls $1803 for zero.
+	//
+	// A correct edge-triggered implementation (arm when length >= 0x8000,
+	// fire on falling-edge crossing of 0x8000, clear on $1803 read) was
+	// tried 2026-06-19 and reverted: it broke the CR-bit-0x80 soft-reset
+	// path (callers pass val=false to "clear", but the edge detector reads
+	// that as arm and then spuriously fires on the next fill byte), and it
+	// also needs to respect adpcm_length_latch_enabled() in the playback
+	// decrement (every other length-modify site does). If a game is later
+	// demonstrated to need the half-IRQ for animation pacing, restore with
+	// those three corner cases handled (soft-reset disarm, EOF-read no-arm,
+	// latch-gated playback decrement).
 	(void)val;
 }
 
@@ -1516,6 +1561,9 @@ static void cdc_update_state(void)
 uint8_t
 cd_read(uint16_t addr)
 {
+#if CD_DEBUG_IO
+	cd_io_reads[addr & 0xFF]++;
+#endif
 	switch (addr) {
 
 	// --- $1800: SCSI bus status (signal-based) ---
@@ -2089,6 +2137,51 @@ void cd_subcode_tick(void)
 // wanted samples — each one is an audible zero-fill gap). Read by the
 // CD_AUDIO_DIAG 1 Hz overlay in main.cpp; never reset here.
 volatile uint32_t cd_audio_underruns = 0;
+
+// Diagnostics: per-frame data-sector read tally. Caller fetches and clears;
+// both outputs are valid only when CD_DEBUG_READ is compiled in (else zero).
+void cd_get_and_clear_reads_this_frame(uint32_t *out_count, uint32_t *out_first_lba)
+{
+#if CD_DEBUG_READ
+	if (out_count)     *out_count     = cd_reads_this_frame_count;
+	if (out_first_lba) *out_first_lba = cd_reads_first_lba_this_frame;
+	cd_reads_this_frame_count = 0;
+	cd_reads_first_lba_this_frame = 0;
+	cd_reads_first_lba_valid = false;
+#else
+	if (out_count)     *out_count     = 0;
+	if (out_first_lba) *out_first_lba = 0;
+#endif
+}
+
+// Diagnostics: top-N hottest CD-port reads in the current frame. Writes the
+// $18xx address low byte into out_addr[i] and the hit count into out_count[i],
+// sorted descending. Slots beyond the actual hot ones receive 0 / 0. Clears
+// the histogram. No-op (zero-fills) when CD_DEBUG_IO is compiled out.
+void cd_get_and_clear_io_hotspots(uint8_t *out_addr, uint32_t *out_count, int n)
+{
+	for (int i = 0; i < n; i++) {
+		if (out_addr)  out_addr[i]  = 0;
+		if (out_count) out_count[i] = 0;
+	}
+#if CD_DEBUG_IO
+	for (int slot = 0; slot < n; slot++) {
+		uint32_t best = 0;
+		int      best_addr = -1;
+		for (int a = 0; a < 256; a++) {
+			if (cd_io_reads[a] > best) {
+				best = cd_io_reads[a];
+				best_addr = a;
+			}
+		}
+		if (best == 0 || best_addr < 0) break;
+		if (out_addr)  out_addr[slot]  = (uint8_t)best_addr;
+		if (out_count) out_count[slot] = best;
+		cd_io_reads[best_addr] = 0;
+	}
+	for (int a = 0; a < 256; a++) cd_io_reads[a] = 0;
+#endif
+}
 
 static uint32_t audio_next_file_off = 0xFFFFFFFF;
 
