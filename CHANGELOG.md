@@ -13,7 +13,7 @@ Overclock setting and minor other fixes.
 
 # Unreleased
 
-## New
+## v0.3
 
 - **Overclock on/off toggle** in the settings menu (HSTX boards only). The menu will reboot after the change is saved. Some HuCard games run better with a higher overclock.
 - The in-game settings menu now scrolls when there are more entries than fit on screen.
