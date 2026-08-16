@@ -1,19 +1,35 @@
 # CHANGELOG
 
-Overclock setting and minor other fixes.
+Recently played list, no re-flash of a rom already in flash, SNES controller support on the GPIO port, and PicoNES PCB design v2.6.
 
 # General Info
 
 [Binaries for each configuration and PCB design are at the end of this page](#downloads___).
 
-[See setup section in readme how to install and wire up](https://github.com/fhoedemakers/pico-pcePlus#pico-setup)
+[See the hardware section in the readme for how to install and wire up](https://github.com/fhoedemakers/pico-pcePlus#hardware-requirements)
 
 > [!IMPORTANT]
 > An **RP2350** board is required. The original RP2040 (Pico 1) is not supported.
 
-# Unreleased
+# v0.4
 
-## v0.3
+## New
+
+- **Recently played list.** The last 20 games that were started are kept, newest first. It is opened with Button3 in the rom browser, or with the **Recently played** entry at the top of the settings menu. That entry is present only when the settings menu is opened from the rom browser, which is also the route for pads without a Button3.
+	- Button2 starts the selected game, SELECT removes it from the list, START shows its artwork, Button1 closes the list.
+	- HuCard, SuperGrafx and CD games are all listed.
+	- The list is plain text in `/recent_PCE.txt` in the root of the SD card. A game that is no longer present is reported as missing when it is started. An unreadable list is treated as empty; no other settings are affected.
+	- See [Recently played games](https://github.com/fhoedemakers/pico-pcePlus#recently-played-games).
+- **Roms already present in flash are no longer re-flashed** (boards without PSRAM), so restarting the last played game no longer waits for the flashing step. The image is verified before the write is skipped. That game is marked `[READY]` in the recently played list.
+- **SNES controllers on the GPIO controller port**: all 12 buttons are read. In the menu A chooses, B goes back and X opens the recently played list. Previously a SNES pad was read as a NES pad and these buttons were mapped incorrectly. NES pads are unaffected.
+- **PicoNES PCB design v2.6** replaces v2.1 in the release assets: through-holes for mounting a Pico 2, Pico 2 W or Pimoroni Pico Plus 2 on male headers, and corrected D3/D4 silkscreen labels on controller port 2. No firmware change is required for either revision. See [Custom PCBs](https://github.com/fhoedemakers/pico-pcePlus#custom-pcbs).
+
+## Fixes
+
+- Controller Test reports the detected pad type, names the buttons accordingly and shows the raw word sent by a pad on the GPIO port. Buttons of a NES pad were previously labelled in SNES order.
+- Reset to defaults no longer carries over the obsolete standalone scanline flag from the loaded settings file.
+
+# v0.3
 
 - **Overclock on/off toggle** in the settings menu (HSTX boards only). The menu will reboot after the change is saved. Some HuCard games run better with a higher overclock.
 - The in-game settings menu now scrolls when there are more entries than fit on screen.
@@ -147,21 +163,34 @@ For board-by-board wiring, supported display modes, and which UF2 file to flash,
 | Pico 2 | [picopcePlus_AdafruitDVISD_pico2_arm.uf2](https://github.com/fhoedemakers/pico-pcePlus/releases/latest/download/picopcePlus_AdafruitDVISD_pico2_arm.uf2) |
 | Pimoroni Pico Plus 2 | [picopcePlus_AdafruitDVISD_pico2_arm.uf2](https://github.com/fhoedemakers/pico-pcePlus/releases/latest/download/picopcePlus_AdafruitDVISD_pico2_arm.uf2) |
 
-### PCB Pico 2
+### PicoNES PCB (PCB required)
 
 | Board | Binary |
 |:--|:--|
-| Pico 2 | [picopcePlus_AdafruitDVISD_pico2_arm.uf2](https://github.com/fhoedemakers/pico-pcePlus/releases/latest/download/picopcePlus_AdafruitDVISD_pico2_arm.uf2) |
+| Pico 2 / Pico 2 W | [picopcePlus_AdafruitDVISD_pico2_arm.uf2](https://github.com/fhoedemakers/pico-pcePlus/releases/latest/download/picopcePlus_AdafruitDVISD_pico2_arm.uf2) |
+| Pimoroni Pico Plus 2 | [picopcePlus_AdafruitDVISD_pico2_arm.uf2](https://github.com/fhoedemakers/pico-pcePlus/releases/latest/download/picopcePlus_AdafruitDVISD_pico2_arm.uf2) |
 
-### PCB WS2350-Zero (PCB required)
+PCB: [pico_nesPCB_v2.6.zip](https://github.com/fhoedemakers/pico-pcePlus/releases/latest/download/pico_nesPCB_v2.6.zip) (new in this release, replaces v2.1). [Readme](https://github.com/fhoedemakers/pico-pcePlus#picones-pcb)
+
+3D-printed case: [thingiverse.com/thing:6689537](https://www.thingiverse.com/thing:6689537). When the board is fitted on male headers, use the latest top cover; the older covers assume a Pico soldered flat and leave no room for the USB cable.
+
+### PicoNES Mini PCB, Waveshare RP2350-Zero (PCB required)
 
 | Board | Binary |
 |:--|:--|
 | Waveshare RP2350-Zero | [picopcePlus_WaveShareRP2350ZeroWithPCB_arm.uf2](https://github.com/fhoedemakers/pico-pcePlus/releases/latest/download/picopcePlus_WaveShareRP2350ZeroWithPCB_arm.uf2) |
 
-### PCB Waveshare RP2350-USBA (PCB required)
+PCB: [Gerber_PicoNES_Mini_PCB_v2.0.zip](https://github.com/fhoedemakers/pico-pcePlus/releases/latest/download/Gerber_PicoNES_Mini_PCB_v2.0.zip). [Readme](https://github.com/fhoedemakers/pico-pcePlus#picones-mini-pcb)
+
+3D-printed case: [thingiverse.com/thing:7041536](https://www.thingiverse.com/thing:7041536)
+
+### PicoNES Micro PCB, Waveshare RP2350-USBA (PCB required)
 
 [Binary](https://github.com/fhoedemakers/pico-pcePlus/releases/latest/download/picopcePlus_WaveShare2350USBA_arm_piousb.uf2)
+
+PCB: [Gerber_PicoNES_Micro_v1.2.zip](https://github.com/fhoedemakers/pico-pcePlus/releases/latest/download/Gerber_PicoNES_Micro_v1.2.zip). [Readme](https://github.com/fhoedemakers/pico-pcePlus#picones-micro-pcb)
+
+[Build guide](https://www.instructables.com/PicoNES-RaspberryPi-Pico-Based-NES-Emulator/)
 
 ### Pimoroni Pico DV
 

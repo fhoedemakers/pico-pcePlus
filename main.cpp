@@ -118,6 +118,12 @@ const int8_t g_settings_visibility_pce[MOPT_COUNT] = {
     0,                               // YM Audio, SMS only
     1,                               // Enter bootsel mode
     1,                               // Controller Test
+    // Recently played is rom-browser only and menu.cpp forces it visible on
+    // >= 0, so it already showed via the zero-fill this list left behind.
+    // Stated explicitly so the array length matches MOPT_COUNT again: the next
+    // option appended to the enum then lands on a slot that is missing here,
+    // rather than silently inheriting this one's value. Set to -1 to hide it.
+    1,                               // Recently played
 };
 
 const uint8_t g_available_screen_modes_pce[] = {
